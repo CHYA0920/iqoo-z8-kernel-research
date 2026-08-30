@@ -183,6 +183,11 @@ Both probes are static PIE armeabi-v7a binaries with zero dependencies.
 They each make exactly one syscall and print a delimited result block —
 they are reachability probes, not exploits.
 
+**Device verification**: the CI-built artifacts of this repository were
+executed on the target device (PD2314) side by side with the artifacts
+of the internal research build (same source commit), in the same boot.
+The outputs matched line for line on both probes.
+
 ## License
 
 Published for research and defensive education. No warranty. You are
