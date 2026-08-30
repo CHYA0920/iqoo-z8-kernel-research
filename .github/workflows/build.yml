@@ -29,37 +29,9 @@ jobs:
         ls -la build/PD2314-AP3A.240905.015.A2/bin/preload.so
         file build/PD2314-AP3A.240905.015.A2/bin/preload.so
 
-    - name: Build mcast_test (32-bit ARM)
-      working-directory: exploit
-      run: |
-        make mcast-test PROJECT=PD2314-AP3A.240905.015.A2 API=35 2>&1
-        ls -la build/PD2314-AP3A.240905.015.A2/bin/mcast_test
-        file build/PD2314-AP3A.240905.015.A2/bin/mcast_test
-
-    - name: Build sched_test (32-bit ARM)
-      working-directory: exploit
-      run: |
-        make sched-test PROJECT=PD2314-AP3A.240905.015.A2 API=35 2>&1
-        ls -la build/PD2314-AP3A.240905.015.A2/bin/sched_test
-        file build/PD2314-AP3A.240905.015.A2/bin/sched_test
-
     - name: Upload preload.so
       uses: actions/upload-artifact@v4
       with:
         name: preload-so-z8
         path: exploit/build/PD2314-AP3A.240905.015.A2/bin/preload.so
-        if-no-files-found: error
-
-    - name: Upload mcast_test
-      uses: actions/upload-artifact@v4
-      with:
-        name: mcast-test-z8
-        path: exploit/build/PD2314-AP3A.240905.015.A2/bin/mcast_test
-        if-no-files-found: error
-
-    - name: Upload sched_test
-      uses: actions/upload-artifact@v4
-      with:
-        name: sched-test-z8
-        path: exploit/build/PD2314-AP3A.240905.015.A2/bin/sched_test
         if-no-files-found: error
