@@ -1,3 +1,5 @@
+中文说明：[README.zh-CN.md](README.zh-CN.md).
+
 # iQOO Z8 kernel refclone probe
 
 This repository is a 3.1-boundary probe for one specific iQOO Z8 / vivo PD2314 firmware build. It documents and exercises an observable kernel path: perf-based KASLR recovery, KernelSnitch/mm collision positioning, order-3 slab payload placement, futex/rt_mutex plus IP multicast side effect, temporary ashmem fops routing, restoration, and `route-summary`.
@@ -102,5 +104,3 @@ The strongest current evidence is the correlation inside one run: target gate pa
 - [01-observation](docs/01-observation.md): log capture, fields, evidence ladder, and failure mapping.
 - [02-information-leak](docs/02-information-leak.md): perf ring parsing, KASLR candidate selection, and limitations.
 - [03-stack-write](docs/03-stack-write.md): mm/slab, payload, futex/rt_mutex, IP multicast side effect, and restore closure.
-
-中文说明：[README.zh-CN.md](README.zh-CN.md).
