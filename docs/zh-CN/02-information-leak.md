@@ -1,48 +1,81 @@
-# 02 — 信息暴露与攻击面压缩
+# 02. perf KASLR probe
 
-[English](../02-information-leak.md) · [项目首页](../../README.zh-CN.md)
+`rc_perf_leak_text_base()` 的任务是从当前启动的 perf IP sample 中推导 live kernel text base。它不把日志里的某个地址当成固定事实，也不使用跨设备常量；它只接受同一次采样窗口内满足聚类条件的候选页。
 
-## 结论先行
+## perf_event_open 配置
 
-地址泄露是**放大器**，不是 rtmutex 根因。CVE-2026-43499 仍必须修复。限制 perf、调试文件系统、厂商诊断节点和含地址日志，可以降低攻击者对未来内存安全错误的可观测性与可靠性，是必要的纵深防御。
+| 字段 | 当前值 | 作用 |
+| --- | --- | --- |
+| `type` | `PERF_TYPE_SOFTWARE` | 使用软件事件源 |
+| `config` | `PERF_COUNT_SW_CPU_CLOCK` | 以 CPU clock 产生高密度 sample |
+| `sample_period` | `1` | 尽量缩短 200 ms 窗口内的采样间隔 |
+| `sample_type` | `PERF_SAMPLE_IP` | ring 中只需要 IP |
+| `exclude_user` | `1` | 过滤用户态 IP |
+| `disabled` | `1` | mmap ring 后再 reset/enable |
+| mmap data pages | `RC_PERF_PAGES=8` | 1 个 metadata page + 8 个 data pages |
 
-## 暴露类别
+默认采样窗口是 `PERF_PROBE_MSEC=200`。输入值小于 10 ms 或过大时会回退默认，并在日志里打印 `duration out of range`。
 
-| 暴露面 | 设计用途 | 量产风险 | 防御动作 |
-| --- | --- | --- | --- |
-| `perf_event_open` 与 PMU 采样 | 性能分析 | 时序或指令指针相关数据可能削弱 KASLR | 采用严格策略，仅授予可信分析域 |
-| debugfs/tracefs/kprobes | 内核开发与追踪 | 内核地址、对象身份和高权限控制入口 | 不向不可信域挂载；用 SELinux 与 capability 约束 |
-| 厂商调试节点 | 设备/SoC 诊断 | 可能暴露实现日志或内存窗口 | 量产移除，或只允许最小权限专用域 |
-| `/proc`、sysctl、panic 日志 | 运维与故障分析 | 稳定指针和构建细节便于地址推导 | 启用指针限制并脱敏输出 |
-| 构建产物与符号表 | 崩溃归因 | 精确偏移便于二进制匹配 | 控制分发，只按披露政策公开 |
+## ring buffer 解析
 
-## KASLR 不是内存安全边界
+`rc_perf_collect()` 读取 metadata page 的 `data_head` / `data_tail`，按 `perf_event_header` 逐条推进 data ring：
 
-KASLR 只增加不确定性，不会使陈旧指针变安全，也不能计作漏洞修复。安全评审应分开记录两个状态：
+- `PERF_RECORD_SAMPLE`：读取 header 后的 8 字节 IP。
+- `PERF_RECORD_LOST`：累计 lost 计数，用来判断样本质量。
+- `misc & 7 == 1`：该 sample 计入 kernel sample。
+- IP 小于 `RC_PERF_MIN_BASE=0xffffffc008000000` 的样本不进入 text base 候选。
+- IP 用 `RC_PERF_PAGE_MASK=0xffffffffffe00000` 做 2 MiB 对齐归桶。
+- malformed record、越界 record、bucket 溢出都进入统计，不参与候选。
 
-- **语义状态：**错误任务清理是否修正？
-- **暴露状态：**不可信进程能否取得地址相关信息？
+有效日志会同时给出 ring 状态、样本范围和候选页：
 
-只关闭第二项而保留第一项，只是纵深防御；反之，修复生命周期错误也不意味着可以长期开放宽泛调试权限。
+```text
+[*] perf probe ring head=... tail=... records=... samples=... kernel=... lost=... malformed=...
+[*] perf probe sampled duration_ms=200 disable=0/0 min=... max=...
+[*] perf probe candidate page=... window=.../... near=... far=... buckets=...
+[+] perf probe text-base=... min_kip=... samples=...
+[+] slide-kaslr-perf-ok pid=... base=... slide=...
+```
 
-## 设备专项检查点
+参考日志里 `records=2047 samples=2047 kernel=2047 lost=0 malformed=0` 说明该次 ring 没有明显丢失或坏记录；`window=2044/2047` 表示候选窗口覆盖了绝大多数 kernel sample。
 
-所给实验日志表明，被测配置中性能采样以及部分厂商/调试设施可达。该结论依赖具体构建和策略，量产审核必须检查正在交付的镜像：
+## 候选页选择
 
-- `perf_event_paranoid` 的实际行为与 SELinux 域权限；
-- debugfs、tracefs 是否挂载，shell/app 域是否可访问；
-- 厂商 debug 路径是否泄露内核地址或提供任意位置读写；
-- crash、trace、telemetry 是否打印未掩码指针；
-- 工程属性是否误留在 release 构建。
+选择函数使用两层约束：
 
-## 加固验收条件
+1. 候选页 `pg` 必须存在明显样本桶，并且 `pg + RC_PERF_PAIR_DELTA` 也有相邻样本。当前 `RC_PERF_PAIR_DELTA=0x1c00000`。
+2. 从 `pg` 开始的 `RC_PERF_WINDOW=0x2000000` 覆盖窗口必须包含绝大多数 kernel samples；当前接受条件约等于 `best_window >= total - total / 4`。
 
-1. 普通应用和 ADB shell 无法打开高权限 perf 事件或含内核地址的 trace 源，除非产品需求有明确例外。
-2. 量产 SELinux 策略拒绝不可信域访问厂商调试节点。
-3. release 构建不通过调试处理器暴露通用内核内存窗口。
-4. 指针类 telemetry 在认证工程模式之外被掩码或移除。
-5. 每个例外均有负责人、威胁模型和自动化回归测试。
+通过后，`pg` 被记为 `kaslr_base`，`kaslr_slide = kaslr_base - KIMAGE_TEXT_BASE`。失败时常见日志是：
 
-## 安全验证
+```text
+[-] perf probe no usable kernel samples
+[-] perf probe rejected histogram best=... window=.../... buckets=...
+[-] perf probe text base out of range=...
+```
 
-验证权限和数据分类，不验证“能否利用”。使用最小程序尝试打开目标诊断接口，仅记录成功/失败与脱敏元数据；不要把检查与堆整形、PI 操作或权限修改组合。
+## 地址换算边界
+
+perf probe 只解决 live text base。后续源码通过：
+
+```c
+return kaslr_base + (image_addr - KIMAGE_TEXT_BASE);
+```
+
+把 `target.h` 中的静态 image 地址换算成当前启动地址。它会影响 fake fops 表中的 CFI jump-table 入口、`init_task`、`sched` 相关静态对象和 restore 时的原始 `ashmem_fops` 地址。
+
+它不证明 mm/slab 碰撞成功，不证明 payload 已经落进目标页，也不证明 fops route 已经发生。KASLR 有效只是 3.1 证据链的第一段。
+
+## 诊断要点
+
+| 日志 | 判断 |
+| --- | --- |
+| `paranoid=-1` | perf 策略允许当前 shell 采样；其他值需结合 `open errno` 判断 |
+| `open retry ... attr_size=...` | 设备内核不接受初始 attr size，源码会降级重试 |
+| `lost > 0` | 采样压力过高或 ring 太小；候选仍可能有效，但证据质量下降 |
+| `malformed > 0` | ring 解析遇到坏记录；该次应谨慎处理 |
+| `buckets` 很少且 `window` 很集中 | 候选质量较好 |
+| `near/far` 都存在 | 符合 pair-delta 特征 |
+| `disable` errno 非 0 | 采样关闭阶段异常；保留日志，不要只看最后的 base |
+
+研究记录里建议保存完整 stdout，而不是只摘 `base` 和 `slide`。地址值会随启动变化；可复核的是采样数量、覆盖比例、候选选择过程和后续阶段是否与该 base 一致。

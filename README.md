@@ -1,89 +1,106 @@
-# iQOO Z8 Kernel Research — Defensive Documentation
+# iQOO Z8 kernel refclone probe
 
-[简体中文](README.zh-CN.md)
+This repository is a 3.1-boundary probe for one specific iQOO Z8 / vivo PD2314 firmware build. It documents and exercises an observable kernel path: perf-based KASLR recovery, KernelSnitch/mm collision positioning, order-3 slab payload placement, futex/rt_mutex plus IP multicast side effect, temporary ashmem fops routing, restoration, and `route-summary`.
 
-> [!CAUTION]
-> **Do not execute shared libraries, preload objects, binaries, scripts, or archives obtained from issues, comments, chat groups, forks, or unofficial mirrors.** A `.so` loaded through `LD_PRELOAD` runs inside the launching process and can read credentials, alter files, contact external systems, or damage a connected device before any advertised kernel test begins. Treat every executable artifact as hostile until its source, build recipe, review history, and cryptographic digest have been independently verified. Use an isolated, non-personal test device with no accounts, tokens, SIM, or valuable data.
+The word `route` is a source-level observation label. It is not a recommendation to build or continue a post-route exploitation chain. This package contains no privilege stage, no persistence stage, no binary deployment framework, no cross-device adaptation, and no second-stage claim.
 
-## Purpose and boundary
+## Scope and package facts
 
-This repository is a documentation-only, defensive study of scheduler priority inheritance (PI), futex requeue-PI cleanup, and related kernel invariants on a privately owned vivo iQOO Z8 (PD2314) sample. It explains design intent, binary evidence, failure semantics, remediation, and safe validation.
+- The source tree keeps only the 3.1 path and earlier prerequisites. Later-stage constants, unrelated comments, and stale log residues have been removed.
+- The package does not include a prebuilt `probe.so`, device dumps, external context copies, dmesg files, tombstones, full logcat captures, or captured console logs.
+- Log snippets in the documentation explain fields and evidence boundaries. Real conclusions must come from stdout/logcat/dmesg collected on the exact target device.
+- The worker checks the build fingerprint and kernel release before running. On mismatch it exits instead of probing.
 
-The project does **not** endorse unauthorized access, privilege escalation, persistence, or deployment of vulnerability payloads. These documents intentionally omit a runnable exploit chain, heap-reclamation recipes, forged-object layouts intended for exploitation, privilege-modification procedures, and weaponized parameters. Kernel addresses and instruction offsets are included only where needed to audit the supplied image and review a repair.
+## Safety baseline
 
-The target is an AArch64 vendor kernel identified as `5.10.233-android12-9`. Android userspace/OTA labels can differ; the kernel version string alone never proves vulnerability or remediation because vendors backport fixes.
+Do not run unknown, unaudited, or unreproducible binaries on a device. Build locally from reviewed source and compare hashes on both host and device. Do not use this code on other models, other firmware builds, or third-party devices; it targets only the build below.
 
-## Test device
+Running the probe can cause reboot, kernel panic, watchdog hang, temporary freeze, or test-time data loss; the operator accepts that risk. If the device becomes unresponsive, long-pressing volume-down plus power usually forces a restart and restores device access; if the model uses a different recovery key sequence, follow the official device instructions. On the exact target firmware and with a legitimate owner running it, this repository does not implement persistence or a privilege-resident stage, so permanent damage should not normally occur, but it cannot be guaranteed.
 
-All tests and code in this repository are based on the following device:
+## Target build
 
-| Property | Value |
+| Item | Value |
 | --- | --- |
-| `ro.product.model` | V2314A |
-| `ro.product.board` | k6895v1_64 |
-| `ro.board.platform` | mt6895 |
-| `ro.product.platform` | (empty) |
-| `ro.product.cpu.abi` | arm64-v8a |
-| `ro.product.manufacturer` | vivo |
-| `ro.product.brand` | vivo |
-| `ro.product.device` | PD2314 |
-| `ro.product.name` | PD2314 |
-| `ro.hardware` | mt6895 |
-| `ro.build.fingerprint` | vivo/PD2314/PD2314:15/AP3A.240905.015.A2/compiler260617110852:user/release-keys |
-| `ro.build.display.id` | PD2314_A_15.2.18.0.W10 |
-| `ro.build.id` | AP3A.240905.015.A2 |
-| `ro.build.tags` | release-keys |
-| `ro.build.type` | user |
-| `uname -r` | 5.10.233-android12-9-g44ec642832da-dirty |
+| Device | iQOO Z8 / vivo PD2314 |
+| Build fingerprint | `vivo/PD2314/PD2314:15/AP3A.240905.015.A2/compiler260617110852:user/release-keys` |
+| Kernel release | `5.10.233-android12-9-g44ec642832da-dirty` |
+| Output | `exploit/build/PD2314-AP3A.240905.015.A2/bin/probe.so` |
 
-## Main conclusion
+## Build and hash check
 
-The relevant failure is a task-identity mismatch in the rtmutex proxy-lock rollback path associated with **CVE-2026-43499**. In the affected pattern, `remove_waiter()` performs cleanup against `current`, although the waiter belongs to `waiter->task`. During futex requeue-PI these tasks may differ. The real waiter can therefore retain a stale `pi_blocked_on` pointer to a waiter object whose lifetime has ended. A later, legitimate PI priority-propagation walk trusts that internal pointer and consumes stale state.
+```bash
+cd exploit
+make probe PROJECT=PD2314-AP3A.240905.015.A2 API=35
+sha256sum build/PD2314-AP3A.240905.015.A2/bin/probe.so
+```
 
-The semantic repair is to use `waiter->task` consistently for the task `pi_lock`, clearing `pi_blocked_on`, and the top-task argument passed into priority-chain adjustment. Backport the exact upstream/vendor-approved change and also include the follow-up self-deadlock handling associated with **CVE-2026-53166**; applying an isolated hand-edited hunk without regression coverage is not sufficient.
+To build the two auxiliary test binaries as well:
 
-## Documentation map
+```bash
+make PROJECT=PD2314-AP3A.240905.015.A2 API=35
+```
 
-| English | 简体中文 | Subject |
-| --- | --- | --- |
-| [Research map](docs/research-map.md) | [研究地图](docs/zh-CN/research-map.md) | Trust boundaries, invariant failure, remediation gates |
-| [01 — Observation](docs/01-observation.md) | [01 — 观测](docs/zh-CN/01-observation.md) | Safe lab operation and evidence collection |
-| [02 — Information exposure](docs/02-information-leak.md) | [02 — 信息暴露](docs/zh-CN/02-information-leak.md) | KASLR/perf/debug surfaces and hardening |
-| [03 — Root cause](docs/03-stack-write.md) | [03 — 根因](docs/zh-CN/03-stack-write.md) | Futex PI proxy-lock lifetime and the repair |
-| [04 — PI propagation](docs/04-fire-walk.md) | [04 — PI 传播](docs/zh-CN/04-fire-walk.md) | How later scheduler activity re-consumes stale state |
-| [05 — Methodology](docs/05-methodology.md) | [05 — 方法论](docs/zh-CN/05-methodology.md) | Evidence grading and safe validation |
-| [06 — Static analysis](docs/06-static-analysis.md) | [06 — 静态分析](docs/zh-CN/06-static-analysis.md) | AArch64 instruction-level findings |
+After pushing, verify the device-side file:
 
-English and Chinese files are complete mirrors with the same section structure. Historical filenames `03-stack-write.md` and `04-fire-walk.md` are retained only to preserve repository links; their content has been reframed around defensive root-cause and propagation analysis.
+```bash
+adb push build/PD2314-AP3A.240905.015.A2/bin/probe.so /data/local/tmp/probe.so
+adb shell sha256sum /data/local/tmp/probe.so
+```
 
-## Repair priorities
+## Logging-first run
 
-1. **Correct the lifetime invariant:** update the vendor `remove_waiter()` path to operate on `waiter->task`, under that task's `pi_lock`, and propagate the same task identity into chain adjustment.
-2. **Include the follow-up guard:** verify the requeue-PI self-deadlock path cannot call cleanup with an uninitialized/NULL `waiter->task` (CVE-2026-53166).
-3. **Reduce exposure:** restrict production perf events, debugfs/tracefs, vendor debug nodes, and kernel-address-bearing logs according to product requirements.
-4. **Validate by invariant:** after every rollback/timeout/signal path, a task returning to userspace must not retain `pi_blocked_on`; all RB-tree membership and task references must be protected by the correct locks.
+The probe result depends on correlated logs. Use one terminal for stdout and another terminal for live logcat:
 
-## Artifact policy for contributors
+```bash
+adb logcat -b all -v threadtime > logcat-live.txt
+```
 
-- Documentation pull requests are welcome. Do not attach prebuilt `.so`, APK, ELF, kernel modules, encrypted archives, or device images.
-- Do not ask reviewers to run an opaque artifact. Provide source, exact build instructions, compiler identity, and reproducible digests when a test artifact is genuinely necessary outside this documentation branch.
-- Redact device identifiers, account data, tokens, boot identifiers, and absolute runtime kernel addresses from logs before publication.
-- Report a suspected security issue privately to the device/kernel vendor before publishing material that increases operational exploitability.
+Run the probe:
 
-## Evidence identity
+```bash
+adb shell 'Z_REFCLONE=1 LD_PRELOAD=/data/local/tmp/probe.so /system/bin/toybox id' 2>&1 | tee probe-console.txt
+```
 
-The static findings in this documentation were derived from the supplied AArch64 ELF and kallsyms set. Recorded SHA-256 values:
+If the device reboots or hangs, collect what remains after recovery:
 
-- ELF: `77cfbe299179360f54b5cb41f119766d3642a07208ce09d87b238072fbf19a52`
-- ELF container archive: `149ba95260bf86806f98771bc86403ce2317d3b359b60b29d7865ebda3756dd0`
-- kallsyms: `539dddd5bc02d86460b1fa9d6bc6808b0610395462fa271a8be261dd2ec518a2`
+```bash
+adb shell getprop ro.boot.bootreason
+adb shell dmesg > dmesg-after.txt
+```
 
-## References
+The `pr_*` logs write to stdout by default, and the supervisor makes stdout unbuffered. logcat is complementary system evidence; it is not guaranteed to contain the full probe stdout. ANSI color sequences may appear in terminal output and can be kept in the raw archive.
 
-- [Linux upstream fix 3bfdc63936dd — `rtmutex: Use waiter::task instead of current in remove_waiter()`](https://git.kernel.org/linus/3bfdc63936dd4773109b7b8c280c0f3b5ae7d349)
-- [Debian tracker: CVE-2026-43499](https://security-tracker.debian.org/tracker/CVE-2026-43499)
-- [Red Hat: CVE-2026-53166 follow-up regression](https://access.redhat.com/security/cve/cve-2026-53166)
+## Technical observation surface
 
-## Disclaimer
+| Stage | Key logs | What it shows | It does not prove alone |
+| --- | --- | --- | --- |
+| Target gate | `probe profile applied`, `probe context`, `probe build` | Worker entered the 3.1 profile on the expected build | Vulnerability presence |
+| perf KASLR | `perf probe ring`, `candidate page`, `slide-kaslr-perf-ok` | Kernel IP samples selected a live text base | Later memory placement |
+| mm/slab | `prepare_kernel_page geom`, `kernelsnitch collision-scan leaked mm` | mm collision produced an order-3 slab-near address | Payload hit the intended object |
+| payload | `tcp payload geometry`, `final payload invariant ok` | The two user-space 32 KiB chunks are internally consistent | The kernel page now has that layout |
+| spray | `af_unix order3 staged pairs`, `spray sent=4096` | AF_UNIX/sk_buff send count and first failure point | fops routing occurred |
+| futex/rt_mutex | `FUTEX_CMP_REQUEUE_PI`, `slide ip side effect sched_ok=1` | PI requeue and consumer `sched_setattr` side effect occurred | The target slot was written |
+| restore | `misc.fops restore ... ret=8 errno=0` | The original `ashmem_fops` pointer was written back | Every prior stage was stable |
+| summary | `route-summary ... kaslr=1 ... route_done=1` | Worker reached the 3.1 end point | `route_done=1` is not a standalone proof |
 
-No warranty is provided. Authorization, safety, disclosure coordination, export rules, and compliance with local law remain the user's responsibility.
+The strongest current evidence is the correlation inside one run: target gate passed, perf base accepted, KernelSnitch collision and `mm` leak appeared, spray count completed, futex/sched side effect appeared, restore returned `ret=8`, and `route-summary` was printed. If a segment is missing, only the observations before that segment should be treated as supported.
+
+## Runtime knobs
+
+| Variable | Default | Purpose |
+| --- | ---: | --- |
+| `PERF_PROBE_MSEC` | `200` | perf sampling window; invalid values fall back to the default |
+| `PAGE_PREP_SLABS` | `16` | mm/slab preparation scale; retry attempts raise it to `32` |
+| `PROCESS_VM_CONSUMER_MAX_CALLS` | `1` | `sched_setattr` calls per consumer round |
+| `SLIDE_IP_ROUTE_ATTEMPTS` | `1` | IP multicast side-effect route attempts |
+| `SLIDE_IP_ROUTE_ARM_SEQ` | `1` | sequence that releases the consumer |
+| `SLIDE_IP_MAIN_CONSUMER_DELAY_USEC` | `0` | consumer delay before `sched_setattr` |
+| `SLIDE_IP_POST_SETSOCKOPT_HOLD` | `20000` | yield window before the consumer is released |
+
+## Deep-dive docs
+
+- [01-observation](docs/01-observation.md): log capture, fields, evidence ladder, and failure mapping.
+- [02-information-leak](docs/02-information-leak.md): perf ring parsing, KASLR candidate selection, and limitations.
+- [03-stack-write](docs/03-stack-write.md): mm/slab, payload, futex/rt_mutex, IP multicast side effect, and restore closure.
+
+中文说明：[README.zh-CN.md](README.zh-CN.md).

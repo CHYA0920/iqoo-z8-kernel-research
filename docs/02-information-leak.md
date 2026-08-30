@@ -1,48 +1,81 @@
-# 02 — Information Exposure and Attack-Surface Reduction
+# 02. perf KASLR probe
 
-[简体中文](zh-CN/02-information-leak.md) · [Project home](../README.md)
+`rc_perf_leak_text_base()` derives the live kernel text base from perf IP samples collected during the current boot. It does not treat an address copied from another log as fixed truth, and it does not use cross-device constants; it accepts only a candidate page that satisfies the clustering checks inside the same sampling window.
 
-## Outcome first
+## perf_event_open setup
 
-Address disclosure is an **amplifier**, not the rtmutex root cause. Fixing CVE-2026-43499 remains mandatory. Restricting perf, debug filesystems, vendor diagnostics, and address-bearing logs reduces reliability and observability available to an attacker and limits damage from future memory-safety bugs.
+| Field | Current value | Purpose |
+| --- | --- | --- |
+| `type` | `PERF_TYPE_SOFTWARE` | software event source |
+| `config` | `PERF_COUNT_SW_CPU_CLOCK` | dense CPU-clock samples |
+| `sample_period` | `1` | short interval inside the 200 ms window |
+| `sample_type` | `PERF_SAMPLE_IP` | only IP is needed from each record |
+| `exclude_user` | `1` | filter user-space IPs |
+| `disabled` | `1` | mmap first, then reset/enable |
+| mmap data pages | `RC_PERF_PAGES=8` | one metadata page plus eight data pages |
 
-## Exposure classes
+The default collection window is `PERF_PROBE_MSEC=200`. Inputs below 10 ms or above the accepted range fall back to the default and log `duration out of range`.
 
-| Surface | Intended purpose | Production risk | Defensive action |
-| --- | --- | --- | --- |
-| `perf_event_open` and PMU sampling | Profiling and performance diagnosis | Timing or instruction-pointer correlated data may weaken KASLR | Set a restrictive policy; grant access only to trusted profiling domains |
-| debugfs/tracefs/kprobes | Kernel development and tracing | Kernel addresses, object identities, and privileged control paths | Do not mount for untrusted domains; enforce SELinux and capabilities |
-| Vendor debug nodes | Device/SoC diagnosis | Often expose implementation-specific logs or memory windows | Remove from production builds or require a narrowly scoped privileged domain |
-| `/proc`, sysctls, panic logs | Operations and postmortem analysis | Stable pointers and build details improve address inference | Apply pointer restrictions and redact exported diagnostics |
-| Build artifacts and symbol maps | Crash triage | Exact offsets enable binary matching | Control distribution; publish only what disclosure policy permits |
+## Ring parsing
 
-## KASLR is not a memory-safety boundary
+`rc_perf_collect()` reads `data_head` / `data_tail` from the metadata page and walks the data ring by `perf_event_header`:
 
-KASLR raises uncertainty. It does not make a stale pointer safe and must not be credited as remediation. A secure review therefore records two separate statuses:
+- `PERF_RECORD_SAMPLE`: read the 8-byte IP after the header.
+- `PERF_RECORD_LOST`: accumulate lost records as sample-quality evidence.
+- `misc & 7 == 1`: count the record as a kernel sample.
+- IP below `RC_PERF_MIN_BASE=0xffffffc008000000` is excluded from text-base candidates.
+- IP is bucketed with `RC_PERF_PAGE_MASK=0xffffffffffe00000`, giving 2 MiB-aligned buckets.
+- malformed records, out-of-range records, and bucket overflow are counted and excluded from selection.
 
-- **Semantic status:** is the wrong-task cleanup fixed?
-- **Exposure status:** can an untrusted process obtain address-correlated information?
+Useful logs include ring state, sample range, and selected candidate:
 
-Closing the second while leaving the first open is defense in depth only. Conversely, fixing the lifetime bug does not justify leaving broad debug access enabled.
+```text
+[*] perf probe ring head=... tail=... records=... samples=... kernel=... lost=... malformed=...
+[*] perf probe sampled duration_ms=200 disable=0/0 min=... max=...
+[*] perf probe candidate page=... window=.../... near=... far=... buckets=...
+[+] perf probe text-base=... min_kip=... samples=...
+[+] slide-kaslr-perf-ok pid=... base=... slide=...
+```
 
-## Device-specific review points
+In one reference run, `records=2047 samples=2047 kernel=2047 lost=0 malformed=0` indicated a clean ring parse, and `window=2044/2047` showed that the selected window covered almost all kernel samples.
 
-The supplied laboratory logs indicate that performance sampling and vendor/debug facilities were reachable in the tested configuration. That observation is build- and policy-specific. A production audit should verify the effective state on the shipping image rather than copying lab assumptions:
+## Candidate selection
 
-- actual `perf_event_paranoid` behavior and SELinux domain permissions;
-- whether debugfs and tracefs are mounted and accessible to shell/app domains;
-- whether vendor nodes under debug paths disclose kernel addresses or permit arbitrary-position reads/writes;
-- whether crash, trace, or telemetry output prints unmasked pointers;
-- whether engineering properties accidentally persist in release builds.
+The selector uses two constraints:
 
-## Hardening acceptance criteria
+1. Candidate page `pg` must have a visible bucket, and `pg + RC_PERF_PAIR_DELTA` must also have nearby samples. Current `RC_PERF_PAIR_DELTA=0x1c00000`.
+2. The `RC_PERF_WINDOW=0x2000000` range starting at `pg` must cover the large majority of kernel samples. The current acceptance condition is approximately `best_window >= total - total / 4`.
 
-1. An ordinary application and ADB shell cannot open privileged perf events or kernel-address-bearing trace sources unless product requirements explicitly allow it.
-2. Production SELinux policy denies vendor debug nodes to untrusted domains.
-3. Release builds do not expose generic kernel-memory windows through debug handlers.
-4. Pointer-bearing telemetry is masked or removed outside authenticated engineering modes.
-5. Any exception is documented with an owner, threat model, and automated regression test.
+After acceptance, `pg` becomes `kaslr_base`, and `kaslr_slide = kaslr_base - KIMAGE_TEXT_BASE`. Common failure logs:
 
-## Safe validation
+```text
+[-] perf probe no usable kernel samples
+[-] perf probe rejected histogram best=... window=.../... buckets=...
+[-] perf probe text base out of range=...
+```
 
-Validate permissions and data classification, not exploitability. Use a minimal program that attempts to open the intended diagnostic interface and records only success/failure and sanitized metadata. Do not combine the check with heap shaping, PI manipulation, or privilege-changing behavior.
+## Address-conversion boundary
+
+perf only solves the live text base. Later source uses:
+
+```c
+return kaslr_base + (image_addr - KIMAGE_TEXT_BASE);
+```
+
+to convert static image addresses in `target.h` into current-boot addresses. This affects the CFI jump-table entries in the fake fops table, `init_task`, scheduler-related static objects, and the original `ashmem_fops` pointer used during restore.
+
+It does not prove mm/slab collision success, payload placement, or fops routing. KASLR acceptance is only the first segment of the 3.1 evidence chain.
+
+## Diagnostic points
+
+| Log | Reading |
+| --- | --- |
+| `paranoid=-1` | perf policy allows shell sampling; other values need `open errno` context |
+| `open retry ... attr_size=...` | kernel rejected the initial attr size, and the source retried with a smaller one |
+| `lost > 0` | sampling pressure or ring size may have dropped data; candidate quality is weaker |
+| `malformed > 0` | bad ring records were seen; handle the run cautiously |
+| small `buckets` with concentrated `window` | candidate quality is usually good |
+| both `near` and `far` present | pair-delta feature matched |
+| non-zero `disable` errno | shutdown path was abnormal; preserve full logs, not just `base` |
+
+Research notes should keep the full stdout, not just `base` and `slide`. Address values change across boots; the reproducible material is the sample count, coverage ratio, candidate-selection process, and whether later stages remain consistent with that base.
