@@ -1,3 +1,5 @@
+English mirror: [README.md](README.md).
+
 # iQOO Z8 kernel refclone probe
 
 这是一个面向 iQOO Z8 / vivo PD2314 指定固件的 3.1 边界探测仓库。它研究的是一条可观测的内核路径：perf 采样解析 KASLR、KernelSnitch/mm 碰撞定位、order-3 slab payload 落点、futex/rt_mutex 与 IP multicast side effect、ashmem fops 临时路由、还原以及 `route-summary`。
@@ -102,5 +104,3 @@ adb shell dmesg > dmesg-after.txt
 - [01-observation](docs/zh-CN/01-observation.md)：日志采集、字段解释、证据阶梯和失败定位。
 - [02-information-leak](docs/zh-CN/02-information-leak.md)：perf ring 解析、KASLR base 候选选择和日志边界。
 - [03-stack-write](docs/zh-CN/03-stack-write.md)：mm/slab、payload、futex/rt_mutex、IP multicast side effect 与 restore 闭环。
-
-English mirror: [README.md](README.md).
