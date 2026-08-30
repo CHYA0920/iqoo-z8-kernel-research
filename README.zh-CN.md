@@ -13,6 +13,29 @@
 
 目标为 AArch64 厂商内核，版本标识 `5.10.233-android12-9`。Android 用户空间/OTA 标签可能不同；厂商常做补丁回移，因此仅凭版本字符串既不能判定有漏洞，也不能判定已修复。
 
+## 测试设备
+
+本仓库全部测试和代码均基于以下设备：
+
+| 属性 | 值 |
+| --- | --- |
+| `ro.product.model` | V2314A |
+| `ro.product.board` | k6895v1_64 |
+| `ro.board.platform` | mt6895 |
+| `ro.product.platform` | (空) |
+| `ro.product.cpu.abi` | arm64-v8a |
+| `ro.product.manufacturer` | vivo |
+| `ro.product.brand` | vivo |
+| `ro.product.device` | PD2314 |
+| `ro.product.name` | PD2314 |
+| `ro.hardware` | mt6895 |
+| `ro.build.fingerprint` | vivo/PD2314/PD2314:15/AP3A.240905.015.A2/compiler260617110852:user/release-keys |
+| `ro.build.display.id` | PD2314_A_15.2.18.0.W10 |
+| `ro.build.id` | AP3A.240905.015.A2 |
+| `ro.build.tags` | release-keys |
+| `ro.build.type` | user |
+| `uname -r` | 5.10.233-android12-9-g44ec642832da-dirty |
+
 ## 核心结论
 
 相关失效是 **CVE-2026-43499** 所描述的 rtmutex 代理加锁回滚路径“任务身份错配”。受影响实现中的 `remove_waiter()` 按 `current` 清理，但 waiter 实际属于 `waiter->task`；futex requeue-PI 场景下两者可以不同。真实 waiter 任务因而可能保留指向已结束生命周期栈对象的 `pi_blocked_on`。随后完全合法的 PI 优先级传播会信任该内核内部指针并再次消费陈旧状态。
