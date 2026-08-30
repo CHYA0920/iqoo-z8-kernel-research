@@ -1,0 +1,12 @@
+build/
+deploy/
+*.o
+*.so
+*.exe
+__pycache__/
+*.pyc
+*.bin
+*.img
+*.elf
+vmlinux
+boot.img
