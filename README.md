@@ -1,6 +1,6 @@
 # iQOO Z8 Kernel Research
 
-[中文文档 / Chinese documentation](README.zh-CN.md)
+[中文文档 / Chinese documentation](README.zh-CN.md) — the Chinese mirror includes a complete set of Chinese research documents (docs/zh-CN/).
 
 ## Research notice
 
@@ -162,6 +162,7 @@ docs/
   04-fire-walk.md          stage 3.1: PI walk execution
   05-methodology.md        evidence tiers, criterion-first, single-variable rounds
   06-static-analysis.md    kernel static analysis notes
+docs/zh-CN/               complete Chinese mirror of the seven documents
 .github/workflows/build.yml   CI: builds and uploads both probes
 ```
 

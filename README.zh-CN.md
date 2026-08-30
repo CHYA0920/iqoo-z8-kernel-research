@@ -10,6 +10,8 @@
 
 复现本仓库的观测结论需要:同型号实体设备、相同内核构建、受控测试环境。对不属于自己的设备使用相关技术,在绝大多数司法辖区属于违法行为。
 
+**阅读提示:本仓库为双语完整镜像。** 当前页面为中文阅读链路的入口:研究地图与全部六份详细文档均有完整中文版(`docs/zh-CN/`),中文阅读无需跳转英文;需要英文时随时经顶部链接切换。
+
 ## 公开边界
 
 已公开:
@@ -48,13 +50,13 @@
          几何并安全返回,ret2 = 0)...................... 已敲定
 ```
 
-带每节点细节的完整版地图见 [docs/research-map.md](docs/research-map.md)。
+带每节点细节的完整版地图见 [docs/zh-CN/research-map.md](docs/zh-CN/research-map.md)。
 
 ## 研究价值
 
 **1. 一套可运转的微秒级观测系统。** 在生产 Android 设备上做内核利用研究,通常会安静地死掉:内核 panic 后,shell 级诊断基本不可用(本设备的 pstore、console、kmsg 全部被权限封死)。本计划从结构上解决了这个问题。TCP 探针通道以微秒分辨率上报每阶段时间戳(连接、payload 就绪、触发),并在内核死亡后仍存活足够长时间以被抓取;O_DSYNC 直写日志通道保证 panic 前最后一行诊断在设备重启前已经落盘。连续十八轮以上双通道全活。后续每一个结论之所以可证伪,靠的都是这套基础设施。
 
-**2. 三级证据纪律应用于内核研究。** 本计划每个结论都携带显式证据等级:A1(直接运行时观测,判据自证行在场)、A2(间接推断,永不单独支撑设计)、B(未探测)。结论从 B 升到 A1 的唯一路径是专用判据轮。这套纪律记录于 [docs/05-methodology.md](docs/05-methodology.md),在我们看来是整个计划最具复用性的产物:它是"你如何知道你的利用研究结论是真的"这一问题的可运转答案。
+**2. 三级证据纪律应用于内核研究。** 本计划每个结论都携带显式证据等级:A1(直接运行时观测,判据自证行在场)、A2(间接推断,永不单独支撑设计)、B(未探测)。结论从 B 升到 A1 的唯一路径是专用判据轮。这套纪律记录于 [docs/zh-CN/05-methodology.md](docs/zh-CN/05-methodology.md),在我们看来是整个计划最具复用性的产物:它是"你如何知道你的利用研究结论是真的"这一问题的可运转答案。
 
 **3. 基于 perf_event 时序侧信道的 KASLR 披露,以投票机制加固。** text 基址从非特权 perf_event_open 采样恢复。一个关键工程发现:单锚推导在可测比例的启动上概率性出错(错误基址可以偏差兆字节级却仍然"看起来合理")。修复方案是多采样投票——加上投票后,验证批次中的披露通过率达到 100%。实现它的工具族公开在 `exploit/src/kernelsnitch/`。
 
@@ -64,7 +66,7 @@
 
 ## 内核静态分析背景
 
-支撑已公开阶段的静态发现选编在 [docs/06-static-analysis.md](docs/06-static-analysis.md)。要点:
+支撑已公开阶段的静态发现选编在 [docs/zh-CN/06-static-analysis.md](docs/zh-CN/06-static-analysis.md)。要点:
 
 - **rt_waiter 几何(5.10.233,MTK 厂商树)。** 本内核的 `rt_mutex_waiter` 布局:tree_entry 在 +0x00,pi_tree_entry 在 +0x18,task 指针 +0x30,lock 指针 +0x38,prio +0x40,deadline +0x48。以 futex requeue 路径的反汇编核验,不以反编译为准。
 - **compat setsockopt 拷贝路径。** MCAST_JOIN_SOURCE_GROUP 触发的 260 字节 group-source 过滤结构拷贝,以及为什么 compat(32 位调用方)路径才是本 64 位内核上栈位置问题的关键。
@@ -80,7 +82,7 @@ exploit/
     mcast_test.c           setsockopt(MCAST_JOIN_SOURCE_GROUP) 探针
     sched_test.c           sched_setattr 可达性探针
     kernelsnitch/          KASLR 侧信道采样工具族(头文件)
-docs/
+docs/                      英文详细文档
   research-map.md          完整节点地图(含闭环条件)
   01-observation.md        阶段 0:观测基础设施
   02-information-leak.md   阶段 1:KASLR / 符号锚 / 页披露
@@ -88,6 +90,7 @@ docs/
   04-fire-walk.md          阶段 3.1:PI walk 执行
   05-methodology.md        证据分级 / 判据先行 / 单变量轮
   06-static-analysis.md    内核静态分析笔记
+docs/zh-CN/                中文完整镜像(与本页同链路,共七份)
 .github/workflows/build.yml   CI:构建并上传两个探针
 ```
 
