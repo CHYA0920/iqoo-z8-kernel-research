@@ -1,70 +1,89 @@
-# iQOO Z8 kernel refclone probe
+# iQOO Z8 内核研究——防御性技术文档
 
-这是针对 iQOO Z8 / vivo PD2314 指定固件的内核漏洞存在性探测仓库。当前包的边界停在 3.1：完成 KASLR 解析、mm/slab 定位、ashmem fops 路由、rt_mutex/futex 触发、ashmem fops 还原和 `route-summary` 输出。
+[English](README.md)
 
-仓库里已经删掉 3.1 之后的旧阶段残留；当前内容只围绕探测闭环展开。
+> [!CAUTION]
+> **不要运行来自 Issue、评论区、聊天群、Fork 或非官方镜像的共享库、预加载对象、二进制、脚本和压缩包。** 通过 `LD_PRELOAD` 装入的 `.so` 会在启动进程内部执行；在所谓“内核测试”开始前，它就可能读取凭据、修改文件、联网或破坏已连接设备。除非源代码、构建方法、审查历史和密码学摘要均已独立核验，否则一律按恶意文件处理。实验应使用隔离、无个人账户、无令牌、无 SIM 卡、无重要数据的专用样机。
 
-## 目标固件
+## 项目目的与公开边界
 
-| 项目 | 值 |
+本仓库是纯文档、纯防御性的内核研究，研究对象为研究者自有的 vivo iQOO Z8（PD2314）样本，主题包括调度器优先级继承（PI）、futex requeue-PI 清理以及相关内核不变量。文档说明设计原意、二进制证据、失效语义、修复方法和安全验证方案。
+
+本项目**不鼓励**未授权访问、提权、持久化或漏洞载荷部署。文档刻意不提供可运行利用链、堆回收配方、面向利用的伪对象模板、权限修改步骤或武器化参数。只有在审核所给镜像和复核修复所必需时，才保留内核字段偏移与指令位置。
+
+目标为 AArch64 厂商内核，版本标识 `5.10.233-android12-9`。Android 用户空间/OTA 标签可能不同；厂商常做补丁回移，因此仅凭版本字符串既不能判定有漏洞，也不能判定已修复。
+
+## 测试设备
+
+本仓库全部测试和代码均基于以下设备：
+
+| 属性 | 值 |
 | --- | --- |
-| 设备 | iQOO Z8 / vivo PD2314 |
-| Build fingerprint | `vivo/PD2314/PD2314:15/AP3A.240905.015.A2/compiler260617110852:user/release-keys` |
-| Kernel release | `5.10.233-android12-9-g44ec642832da-dirty` |
-| 编译产物 | `exploit/build/PD2314-AP3A.240905.015.A2/bin/probe.so` |
+| `ro.product.model` | V2314A |
+| `ro.product.board` | k6895v1_64 |
+| `ro.board.platform` | mt6895 |
+| `ro.product.platform` | (空) |
+| `ro.product.cpu.abi` | arm64-v8a |
+| `ro.product.manufacturer` | vivo |
+| `ro.product.brand` | vivo |
+| `ro.product.device` | PD2314 |
+| `ro.product.name` | PD2314 |
+| `ro.hardware` | mt6895 |
+| `ro.build.fingerprint` | vivo/PD2314/PD2314:15/AP3A.240905.015.A2/compiler260617110852:user/release-keys |
+| `ro.build.display.id` | PD2314_A_15.2.18.0.W10 |
+| `ro.build.id` | AP3A.240905.015.A2 |
+| `ro.build.tags` | release-keys |
+| `ro.build.type` | user |
+| `uname -r` | 5.10.233-android12-9-g44ec642832da-dirty |
 
-`refclone.c` 的 worker 会先检查 fingerprint 和 kernel release；不匹配时直接退出，不继续探测。
+## 核心结论
 
-## 构建
+相关失效是 **CVE-2026-43499** 所描述的 rtmutex 代理加锁回滚路径“任务身份错配”。受影响实现中的 `remove_waiter()` 按 `current` 清理，但 waiter 实际属于 `waiter->task`；futex requeue-PI 场景下两者可以不同。真实 waiter 任务因而可能保留指向已结束生命周期栈对象的 `pi_blocked_on`。随后完全合法的 PI 优先级传播会信任该内核内部指针并再次消费陈旧状态。
 
-```bash
-cd exploit
-make probe PROJECT=PD2314-AP3A.240905.015.A2 API=35
-```
+语义修复是：任务 `pi_lock`、`pi_blocked_on` 清零以及传给优先级链调整的 top-task 参数，均统一使用 `waiter->task`。应回移上游或厂商审核过的完整补丁，并同时包含 **CVE-2026-53166** 对自死锁/未初始化 waiter 的后续保护；不能只手工摘取一个差异片段而不做回归覆盖。
 
-如果需要同时构建两个辅助测试程序：
+## 文档导航
 
-```bash
-make PROJECT=PD2314-AP3A.240905.015.A2 API=35
-```
+| 简体中文 | English | 主题 |
+| --- | --- | --- |
+| [研究地图](docs/zh-CN/research-map.md) | [Research map](docs/research-map.md) | 信任边界、不变量失效、修复关卡 |
+| [01 — 观测](docs/zh-CN/01-observation.md) | [01 — Observation](docs/01-observation.md) | 安全实验与证据采集 |
+| [02 — 信息暴露](docs/zh-CN/02-information-leak.md) | [02 — Information exposure](docs/02-information-leak.md) | KASLR/perf/debug 暴露面与加固 |
+| [03 — 根因](docs/zh-CN/03-stack-write.md) | [03 — Root cause](docs/03-stack-write.md) | futex PI 代理加锁生命周期与修复 |
+| [04 — PI 传播](docs/zh-CN/04-fire-walk.md) | [04 — PI propagation](docs/04-fire-walk.md) | 后续调度活动为何会重消费陈旧状态 |
+| [05 — 方法论](docs/zh-CN/05-methodology.md) | [05 — Methodology](docs/05-methodology.md) | 证据分级与安全验证 |
+| [06 — 静态分析](docs/zh-CN/06-static-analysis.md) | [06 — Static analysis](docs/06-static-analysis.md) | AArch64 指令级结论 |
 
-## 运行
+中英文文件使用相同章节结构并互相链接。历史文件名 `03-stack-write.md` 和 `04-fire-walk.md` 仅为保持仓库链接兼容而保留；内容已经改写为防御性的根因与传播分析。
 
-```bash
-adb push exploit/build/PD2314-AP3A.240905.015.A2/bin/probe.so /data/local/tmp/probe.so
-adb shell 'Z_REFCLONE=1 LD_PRELOAD=/data/local/tmp/probe.so /system/bin/toybox id'
-```
+## 修复优先级
 
-运行入口仍然利用 `LD_PRELOAD` constructor 拉起 worker；产物名、入口名和日志已经改成 probe 语义。
+1. **修正生命周期不变量：**厂商 `remove_waiter()` 路径必须使用 `waiter->task`，持有该任务的 `pi_lock`，并将同一任务身份传给链调整。
+2. **纳入后续保护：**确认 requeue-PI 自死锁路径不会用未初始化或 NULL 的 `waiter->task` 调用清理逻辑（CVE-2026-53166）。
+3. **压缩暴露面：**按产品需求限制生产环境 perf、debugfs/tracefs、厂商调试节点及包含内核地址的日志。
+4. **按不变量验收：**任何回滚、超时或信号退出后，返回用户态的任务都不得仍保留 `pi_blocked_on`；RB 树成员关系与任务引用必须受正确的锁保护。
 
-## 运行链路
+## 参与者产物规则
 
-1. `preload.c` constructor 进入 `run_probe()`。
-2. `main.c` 检查 `Z_REFCLONE=1`，进入 `refclone_load()`。
-3. supervisor fork 三次以内的 worker，worker 用 `/system/bin/toybox id` 承载一次探测。
-4. worker 检查目标固件身份，设置当前链路真实使用的三个默认参数。
-5. `rc_perf_leak_text_base()` 通过 perf IP sample 还原 live KASLR base。
-6. `rc_prepare_fops_page()` 用 KernelSnitch/mm 回收窗口定位 order-3 slab，并喷入两份 32 KiB payload。
-7. `rc_run_main_route_threads()` 组织 waiter/owner/consumer 三线程，用 futex PI + IP multicast side effect 触发 fops 路由。
-8. worker 用 configfs write window 把 `dashmem_misc.fops` 还原到原始 `ashmem_fops`。
-9. 打印 `route-summary`，随后 toybox `id` 输出当前身份。
+- 欢迎文档类 Pull Request。不要附带预编译 `.so`、APK、ELF、内核模块、加密压缩包或设备镜像。
+- 不要要求审阅者运行不透明产物。若文档分支之外确需测试产物，应同时给出源码、精确构建方法、编译器身份及可复现摘要。
+- 公开日志前删除设备标识、账户数据、令牌、boot ID 和运行时绝对内核地址。
+- 对可能显著增加现实利用能力的问题，应先走设备/内核厂商的私密披露流程。
 
-## 可调参数
+## 证据样本身份
 
-| 环境变量 | 默认值 | 用途 |
-| --- | ---: | --- |
-| `PERF_PROBE_MSEC` | `200` | perf 采样窗口，影响 KASLR base 候选质量 |
-| `PAGE_PREP_SLABS` | `16` | mm/slab 预铺规模；第二次 supervisor retry 起自动调到 `32` |
-| `PROCESS_VM_CONSUMER_MAX_CALLS` | `1` | consumer 线程每轮 `sched_setattr` 调用数 |
-| `SLIDE_IP_ROUTE_ATTEMPTS` | `1` | IP multicast side-effect route 尝试轮数 |
-| `SLIDE_IP_ROUTE_ARM_SEQ` | `1` | 从第几轮开始放行 consumer |
-| `SLIDE_IP_MAIN_CONSUMER_DELAY_USEC` | `0` | consumer 调用前延迟 |
-| `SLIDE_IP_POST_SETSOCKOPT_HOLD` | `20000` | 未放行 consumer 时的 yield 保持窗口 |
+本文档的静态结论来自所给 AArch64 ELF 与 kallsyms。记录的 SHA-256：
 
-## 文档
+- ELF：`77cfbe299179360f54b5cb41f119766d3642a07208ce09d87b238072fbf19a52`
+- ELF 容器压缩包：`149ba95260bf86806f98771bc86403ce2317d3b359b60b29d7865ebda3756dd0`
+- kallsyms：`539dddd5bc02d86460b1fa9d6bc6808b0610395462fa271a8be261dd2ec518a2`
 
-- [01-observation](docs/zh-CN/01-observation.md)：运行顺序、日志字段和 3.1 终止边界。
-- [02-information-leak](docs/zh-CN/02-information-leak.md)：perf KASLR probe 的样本解析和候选选择。
-- [03-stack-write](docs/zh-CN/03-stack-write.md)：mm/slab 回收、payload 布局、futex/rt_mutex route 和还原闭环。
+## 参考资料
 
-English mirror: [README.md](README.md).
+- [Linux 上游修复 3bfdc63936dd：`rtmutex: Use waiter::task instead of current in remove_waiter()`](https://git.kernel.org/linus/3bfdc63936dd4773109b7b8c280c0f3b5ae7d349)
+- [Debian：CVE-2026-43499](https://security-tracker.debian.org/tracker/CVE-2026-43499)
+- [Red Hat：后续回归 CVE-2026-53166](https://access.redhat.com/security/cve/cve-2026-53166)
+
+## 免责声明
+
+本文档不提供任何担保。授权边界、实验安全、披露协调、出口规则与所在地法律合规均由使用者自行负责。

@@ -1,70 +1,89 @@
-# iQOO Z8 kernel refclone probe
+# iQOO Z8 Kernel Research — Defensive Documentation
 
-This repository is a probe for the specified iQOO Z8 / vivo PD2314 kernel build. The current package stops at the 3.1 boundary: KASLR recovery, mm/slab positioning, ashmem fops routing, rt_mutex/futex trigger, ashmem fops restoration, and `route-summary`.
+[简体中文](README.zh-CN.md)
 
-Post-3.1 residues have been removed. The current tree focuses only on the probe loop.
+> [!CAUTION]
+> **Do not execute shared libraries, preload objects, binaries, scripts, or archives obtained from issues, comments, chat groups, forks, or unofficial mirrors.** A `.so` loaded through `LD_PRELOAD` runs inside the launching process and can read credentials, alter files, contact external systems, or damage a connected device before any advertised kernel test begins. Treat every executable artifact as hostile until its source, build recipe, review history, and cryptographic digest have been independently verified. Use an isolated, non-personal test device with no accounts, tokens, SIM, or valuable data.
 
-## Target build
+## Purpose and boundary
 
-| Item | Value |
+This repository is a documentation-only, defensive study of scheduler priority inheritance (PI), futex requeue-PI cleanup, and related kernel invariants on a privately owned vivo iQOO Z8 (PD2314) sample. It explains design intent, binary evidence, failure semantics, remediation, and safe validation.
+
+The project does **not** endorse unauthorized access, privilege escalation, persistence, or deployment of vulnerability payloads. These documents intentionally omit a runnable exploit chain, heap-reclamation recipes, forged-object layouts intended for exploitation, privilege-modification procedures, and weaponized parameters. Kernel addresses and instruction offsets are included only where needed to audit the supplied image and review a repair.
+
+The target is an AArch64 vendor kernel identified as `5.10.233-android12-9`. Android userspace/OTA labels can differ; the kernel version string alone never proves vulnerability or remediation because vendors backport fixes.
+
+## Test device
+
+All tests and code in this repository are based on the following device:
+
+| Property | Value |
 | --- | --- |
-| Device | iQOO Z8 / vivo PD2314 |
-| Build fingerprint | `vivo/PD2314/PD2314:15/AP3A.240905.015.A2/compiler260617110852:user/release-keys` |
-| Kernel release | `5.10.233-android12-9-g44ec642832da-dirty` |
-| Output | `exploit/build/PD2314-AP3A.240905.015.A2/bin/probe.so` |
+| `ro.product.model` | V2314A |
+| `ro.product.board` | k6895v1_64 |
+| `ro.board.platform` | mt6895 |
+| `ro.product.platform` | (empty) |
+| `ro.product.cpu.abi` | arm64-v8a |
+| `ro.product.manufacturer` | vivo |
+| `ro.product.brand` | vivo |
+| `ro.product.device` | PD2314 |
+| `ro.product.name` | PD2314 |
+| `ro.hardware` | mt6895 |
+| `ro.build.fingerprint` | vivo/PD2314/PD2314:15/AP3A.240905.015.A2/compiler260617110852:user/release-keys |
+| `ro.build.display.id` | PD2314_A_15.2.18.0.W10 |
+| `ro.build.id` | AP3A.240905.015.A2 |
+| `ro.build.tags` | release-keys |
+| `ro.build.type` | user |
+| `uname -r` | 5.10.233-android12-9-g44ec642832da-dirty |
 
-The worker checks the fingerprint and kernel release before running the probe.
+## Main conclusion
 
-## Build
+The relevant failure is a task-identity mismatch in the rtmutex proxy-lock rollback path associated with **CVE-2026-43499**. In the affected pattern, `remove_waiter()` performs cleanup against `current`, although the waiter belongs to `waiter->task`. During futex requeue-PI these tasks may differ. The real waiter can therefore retain a stale `pi_blocked_on` pointer to a waiter object whose lifetime has ended. A later, legitimate PI priority-propagation walk trusts that internal pointer and consumes stale state.
 
-```bash
-cd exploit
-make probe PROJECT=PD2314-AP3A.240905.015.A2 API=35
-```
+The semantic repair is to use `waiter->task` consistently for the task `pi_lock`, clearing `pi_blocked_on`, and the top-task argument passed into priority-chain adjustment. Backport the exact upstream/vendor-approved change and also include the follow-up self-deadlock handling associated with **CVE-2026-53166**; applying an isolated hand-edited hunk without regression coverage is not sufficient.
 
-To build the two auxiliary test binaries as well:
+## Documentation map
 
-```bash
-make PROJECT=PD2314-AP3A.240905.015.A2 API=35
-```
+| English | 简体中文 | Subject |
+| --- | --- | --- |
+| [Research map](docs/research-map.md) | [研究地图](docs/zh-CN/research-map.md) | Trust boundaries, invariant failure, remediation gates |
+| [01 — Observation](docs/01-observation.md) | [01 — 观测](docs/zh-CN/01-observation.md) | Safe lab operation and evidence collection |
+| [02 — Information exposure](docs/02-information-leak.md) | [02 — 信息暴露](docs/zh-CN/02-information-leak.md) | KASLR/perf/debug surfaces and hardening |
+| [03 — Root cause](docs/03-stack-write.md) | [03 — 根因](docs/zh-CN/03-stack-write.md) | Futex PI proxy-lock lifetime and the repair |
+| [04 — PI propagation](docs/04-fire-walk.md) | [04 — PI 传播](docs/zh-CN/04-fire-walk.md) | How later scheduler activity re-consumes stale state |
+| [05 — Methodology](docs/05-methodology.md) | [05 — 方法论](docs/zh-CN/05-methodology.md) | Evidence grading and safe validation |
+| [06 — Static analysis](docs/06-static-analysis.md) | [06 — 静态分析](docs/zh-CN/06-static-analysis.md) | AArch64 instruction-level findings |
 
-## Run
+English and Chinese files are complete mirrors with the same section structure. Historical filenames `03-stack-write.md` and `04-fire-walk.md` are retained only to preserve repository links; their content has been reframed around defensive root-cause and propagation analysis.
 
-```bash
-adb push exploit/build/PD2314-AP3A.240905.015.A2/bin/probe.so /data/local/tmp/probe.so
-adb shell 'Z_REFCLONE=1 LD_PRELOAD=/data/local/tmp/probe.so /system/bin/toybox id'
-```
+## Repair priorities
 
-The entry point still uses an `LD_PRELOAD` constructor to start the worker, but the artifact name, source entry name, and logs now use probe terminology.
+1. **Correct the lifetime invariant:** update the vendor `remove_waiter()` path to operate on `waiter->task`, under that task's `pi_lock`, and propagate the same task identity into chain adjustment.
+2. **Include the follow-up guard:** verify the requeue-PI self-deadlock path cannot call cleanup with an uninitialized/NULL `waiter->task` (CVE-2026-53166).
+3. **Reduce exposure:** restrict production perf events, debugfs/tracefs, vendor debug nodes, and kernel-address-bearing logs according to product requirements.
+4. **Validate by invariant:** after every rollback/timeout/signal path, a task returning to userspace must not retain `pi_blocked_on`; all RB-tree membership and task references must be protected by the correct locks.
 
-## Execution path
+## Artifact policy for contributors
 
-1. `preload.c` constructor enters `run_probe()`.
-2. `main.c` checks `Z_REFCLONE=1` and enters `refclone_load()`.
-3. The supervisor forks up to three worker attempts, each hosted by `/system/bin/toybox id`.
-4. The worker validates the target build and sets only the defaults used by this route.
-5. `rc_perf_leak_text_base()` derives the live KASLR image base from perf IP samples.
-6. `rc_prepare_fops_page()` uses the KernelSnitch/mm reclaim window to locate an order-3 slab and spray two 32 KiB payload chunks.
-7. `rc_run_main_route_threads()` coordinates waiter/owner/consumer threads and triggers the fops route via futex PI plus the IP multicast side effect.
-8. The worker uses the configfs write window to restore `dashmem_misc.fops` to the original `ashmem_fops`.
-9. `route-summary` is printed, then toybox `id` prints the current process identity.
+- Documentation pull requests are welcome. Do not attach prebuilt `.so`, APK, ELF, kernel modules, encrypted archives, or device images.
+- Do not ask reviewers to run an opaque artifact. Provide source, exact build instructions, compiler identity, and reproducible digests when a test artifact is genuinely necessary outside this documentation branch.
+- Redact device identifiers, account data, tokens, boot identifiers, and absolute runtime kernel addresses from logs before publication.
+- Report a suspected security issue privately to the device/kernel vendor before publishing material that increases operational exploitability.
 
-## Runtime knobs
+## Evidence identity
 
-| Variable | Default | Purpose |
-| --- | ---: | --- |
-| `PERF_PROBE_MSEC` | `200` | perf sampling window for KASLR base selection |
-| `PAGE_PREP_SLABS` | `16` | mm/slab preparation scale; retry attempts raise it to `32` |
-| `PROCESS_VM_CONSUMER_MAX_CALLS` | `1` | `sched_setattr` calls per consumer round |
-| `SLIDE_IP_ROUTE_ATTEMPTS` | `1` | IP multicast route attempts |
-| `SLIDE_IP_ROUTE_ARM_SEQ` | `1` | sequence that releases the consumer |
-| `SLIDE_IP_MAIN_CONSUMER_DELAY_USEC` | `0` | consumer delay before `sched_setattr` |
-| `SLIDE_IP_POST_SETSOCKOPT_HOLD` | `20000` | yield window before the consumer is released |
+The static findings in this documentation were derived from the supplied AArch64 ELF and kallsyms set. Recorded SHA-256 values:
 
-## Docs
+- ELF: `77cfbe299179360f54b5cb41f119766d3642a07208ce09d87b238072fbf19a52`
+- ELF container archive: `149ba95260bf86806f98771bc86403ce2317d3b359b60b29d7865ebda3756dd0`
+- kallsyms: `539dddd5bc02d86460b1fa9d6bc6808b0610395462fa271a8be261dd2ec518a2`
 
-- [01-observation](docs/01-observation.md): entry sequence, log fields, and the 3.1 stop boundary.
-- [02-information-leak](docs/02-information-leak.md): perf KASLR probe mechanics.
-- [03-stack-write](docs/03-stack-write.md): mm/slab placement, payload layout, futex/rt_mutex route, and restore loop.
+## References
 
-中文说明：[README.zh-CN.md](README.zh-CN.md).
+- [Linux upstream fix 3bfdc63936dd — `rtmutex: Use waiter::task instead of current in remove_waiter()`](https://git.kernel.org/linus/3bfdc63936dd4773109b7b8c280c0f3b5ae7d349)
+- [Debian tracker: CVE-2026-43499](https://security-tracker.debian.org/tracker/CVE-2026-43499)
+- [Red Hat: CVE-2026-53166 follow-up regression](https://access.redhat.com/security/cve/cve-2026-53166)
+
+## Disclaimer
+
+No warranty is provided. Authorization, safety, disclosure coordination, export rules, and compliance with local law remain the user's responsibility.

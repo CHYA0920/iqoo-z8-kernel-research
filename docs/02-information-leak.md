@@ -1,53 +1,48 @@
-# 02. perf KASLR probe
+# 02 — Information Exposure and Attack-Surface Reduction
 
-KASLR recovery is implemented in `rc_perf_leak_text_base()`. It does not assume a live base; it derives the current image base from kernel IP samples in the perf ring buffer.
+[简体中文](zh-CN/02-information-leak.md) · [Project home](../README.md)
 
-## perf_event_open configuration
+## Outcome first
 
-| Field | Value | Purpose |
-| --- | --- | --- |
-| `type` | `PERF_TYPE_SOFTWARE` | software event source |
-| `config` | `PERF_COUNT_SW_CPU_CLOCK` | periodic CPU clock samples |
-| `sample_period` | `1` | dense samples in a short window |
-| `sample_type` | `PERF_SAMPLE_IP` | ring records only need IP |
-| `exclude_user` | `1` | ignore user-mode IPs |
-| `disabled` | `1` | enable only after mmap setup |
+Address disclosure is an **amplifier**, not the rtmutex root cause. Fixing CVE-2026-43499 remains mandatory. Restricting perf, debug filesystems, vendor diagnostics, and address-bearing logs reduces reliability and observability available to an attacker and limits damage from future memory-safety bugs.
 
-The default sample window is `PERF_PROBE_MSEC=200` ms. Out-of-range input falls back to the default.
+## Exposure classes
 
-## Ring parsing
+| Surface | Intended purpose | Production risk | Defensive action |
+| --- | --- | --- | --- |
+| `perf_event_open` and PMU sampling | Profiling and performance diagnosis | Timing or instruction-pointer correlated data may weaken KASLR | Set a restrictive policy; grant access only to trusted profiling domains |
+| debugfs/tracefs/kprobes | Kernel development and tracing | Kernel addresses, object identities, and privileged control paths | Do not mount for untrusted domains; enforce SELinux and capabilities |
+| Vendor debug nodes | Device/SoC diagnosis | Often expose implementation-specific logs or memory windows | Remove from production builds or require a narrowly scoped privileged domain |
+| `/proc`, sysctls, panic logs | Operations and postmortem analysis | Stable pointers and build details improve address inference | Apply pointer restrictions and redact exported diagnostics |
+| Build artifacts and symbol maps | Crash triage | Exact offsets enable binary matching | Control distribution; publish only what disclosure policy permits |
 
-`rc_perf_collect()` advances through `perf_event_header` records:
+## KASLR is not a memory-safety boundary
 
-- `PERF_RECORD_SAMPLE` records read IP at `tail + 8`.
-- `misc & 7 == 1` marks a kernel sample.
-- IPs below `0xFFFFFFC008000000` are ignored.
-- IPs are bucketed by 2 MiB text page: `ip & 0xFFFFFFFFFFE00000`.
-- malformed records, lost records, and bucket overflow are logged and affect candidate quality.
+KASLR raises uncertainty. It does not make a stale pointer safe and must not be credited as remediation. A secure review therefore records two separate statuses:
 
-## Base candidate selection
+- **Semantic status:** is the wrong-task cleanup fixed?
+- **Exposure status:** can an untrusted process obtain address-correlated information?
 
-`rc_perf_select_text_page()` selects a base using two properties:
+Closing the second while leaving the first open is defense in depth only. Conversely, fixing the lifetime bug does not justify leaving broad debug access enabled.
 
-1. Both `pg` and `pg + 0x1c00000` have samples.
-2. The `0x2000000` window beginning at `pg` covers most kernel samples.
+## Device-specific review points
 
-If the candidate is 2 MiB aligned and within the expected arm64 kernel text range, it becomes `kaslr_base`:
+The supplied laboratory logs indicate that performance sampling and vendor/debug facilities were reachable in the tested configuration. That observation is build- and policy-specific. A production audit should verify the effective state on the shipping image rather than copying lab assumptions:
 
-```text
-[*] perf probe candidate page=ffffffc0... window=... near=... far=...
-[+] perf probe text-base=ffffffc0... min_kip=... samples=...
-[+] slide-kaslr-perf-ok pid=... base=ffffffc0... slide=...
-```
+- actual `perf_event_paranoid` behavior and SELinux domain permissions;
+- whether debugfs and tracefs are mounted and accessible to shell/app domains;
+- whether vendor nodes under debug paths disclose kernel addresses or permit arbitrary-position reads/writes;
+- whether crash, trace, or telemetry output prints unmasked pointers;
+- whether engineering properties accidentally persist in release builds.
 
-Failures show as `perf probe no usable kernel samples`, `perf probe rejected histogram`, or `slide kaslr leak failed`.
+## Hardening acceptance criteria
 
-## How later stages use it
+1. An ordinary application and ADB shell cannot open privileged perf events or kernel-address-bearing trace sources unless product requirements explicitly allow it.
+2. Production SELinux policy denies vendor debug nodes to untrusted domains.
+3. Release builds do not expose generic kernel-memory windows through debug handlers.
+4. Pointer-bearing telemetry is masked or removed outside authenticated engineering modes.
+5. Any exception is documented with an owner, threat model, and automated regression test.
 
-After `kaslr_base` is set, `text_addr(x)` translates static `KIMAGE_TEXT_BASE` symbols into live boot addresses:
+## Safe validation
 
-```c
-return kaslr_base + (image_addr - KIMAGE_TEXT_BASE);
-```
-
-The fake fops table, `init_task`, scheduler task-group pointer, and original `ashmem_fops` restore value all use this translation.
+Validate permissions and data classification, not exploitability. Use a minimal program that attempts to open the intended diagnostic interface and records only success/failure and sanitized metadata. Do not combine the check with heap shaping, PI manipulation, or privilege-changing behavior.
