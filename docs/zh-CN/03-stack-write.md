@@ -1,54 +1,102 @@
-# 阶段 2 —— 深栈写原语
+# 03 — 根因：futex PI 代理 waiter 生命周期
 
-公开计划的核心成果:一次**逐字节精确、260 字节、研究者撰写内容的写,落到调用任务自身内核栈的可预测槽位**,走的是生产 Android 内核对非特权应用保持可达的 compat syscall 路径。
+[English](../03-stack-write.md) · [项目首页](../../README.zh-CN.md)
 
-## [2.3] 树 stamp 原语
+> 历史文件名仅为保持链接兼容而保留。本文讨论生命周期缺陷与修复，不描述写原语。
 
-### 入口
+## 结论
 
-一个 32 位(armeabi-v7a)任务调用:
+必须修复的原因是 `remove_waiter()` 同时服务两种语义环境：
 
-```c
-setsockopt(fd, IPPROTO_IPV6 /* 0x29 */,
-           MCAST_JOIN_SOURCE_GROUP /* 0x2e */, buf, 260);
+1. 普通 rtmutex 慢速加锁清理，执行任务通常就是 waiter 所属任务；
+2. futex requeue-PI 代理加锁回滚，一个任务可能代替另一个任务操作 waiter。
+
+旧实现使用 `current`，只是在第一种环境中碰巧成立；到第二种环境就发生任务身份错配。权威身份应当是 `waiter->task`。
+
+## 为什么需要代理加锁
+
+PI futex 把用户态 futex 字与内核 rtmutex 结合。requeue-PI 可以把等待任务从非 PI 等待队列迁移到 PI futex，而不先唤醒它制造无控制竞争。因此内核执行一次**代理**操作：当前 requeue 执行者代替真实等待任务修改锁状态。
+
+三种角色必须分清：
+
+| 角色 | 含义 |
+| --- | --- |
+| `current` | 正在执行 requeue/回滚代码的任务 |
+| `waiter->task` | rtmutex waiter 所代表的任务 |
+| lock owner | 当前因持锁而接受优先级捐赠的任务 |
+
+三者可以分别是不同任务。普通路径和代理路径复用的 helper 不能从“谁正在执行”推断“waiter 属于谁”。
+
+## 正常 PI 状态
+
+每个任务具有：
+
+- `pi_blocked_on`：指向该任务当前阻塞的存活 waiter；
+- `pi_waiters`：该任务作为锁 owner 时收到优先级捐赠的 cached RB 树；
+- `pi_lock`：串行化该任务 PI 状态的修改。
+
+关键生命周期规则是：
+
+```text
+task->pi_blocked_on != NULL
+    蕴含 waiter 仍存活、属于 task，且 task 确实正在阻塞。
 ```
 
-内核在验证途中把 260 字节的 group-source 过滤结构从用户内存拷入内核内存。该路径的可达性由公开的 mcast_test 探针验证(单 syscall,定界结果块)。
+因回滚、超时、信号或成功获得锁而删除 waiter 时，必须在 waiter 存储失效前清空该指针。
 
-### 为什么 32 位 compat 是关键
+## 失效的清理
 
-拷贝落点的栈帧深度取决于 syscall 入口路径。compat 路径——32 位调用方进入 64 位内核——拥有与原生路径不同的、更深的帧链。拷贝的栈槽在给定内核构建与入口路径下固定;在本内核上它深处于调用任务的内核栈,harness 每轮核验该偏移。
+受影响代理回滚中 `waiter->task != current`。按 `current` 清理会造成上游修复说明中的三类相关错误：
 
-### 证据:逐字节回读
+1. 删除 waiter 树节点时没有持有真实 waiter 任务的 `pi_lock`；
+2. 真实 waiter 任务的 `pi_blocked_on` 未清零，栈对象生命周期结束后留下悬空指针；
+3. `rt_mutex_adjust_prio_chain()` 收到错误的 top-task 身份。
 
-harness 以原语 stamp 一个完全由研究者撰写的 260 字节 payload(32 qword 加尾部),然后 dump 目标栈区:
+所以根因不是“调度器写得太多”，而是清理阶段制造的**所有权与生命周期违反**。后续调度代码只是在信任本应始终成立的内部状态。
 
-- **判据(BUFFER DUMP)**:dump 出的 32 qword 与构造 payload 逐字节一致。
-- **实测**:谱系每一轮。
+## 语义修复
 
-这是写从"一个拷贝过多的内核 bug"变成工程原语的转折点:目的地固定、尺寸固定、内容任意、按需可重复。
+必须按具体厂商分支/API 适配，但三个任务相关操作要统一使用同一个 `waiter_task`：
 
-### 名字来由
+```c
+/* 仅表示语义；实际应采用上游/厂商审核过的精确回移。 */
+struct task_struct *waiter_task = waiter->task;
 
-目的槽位正落在 futex 优先级继承机制后续走过的区域(见下 [2.1]/[2.2])——原语把内容"stamp"到树消费路径上。[1.3](受控 staging 页)与 [2.3](逐字节精确深栈拷贝器)的组合,使 walk 时刻的几何可以在用户侧撰写。
+raw_spin_lock(&waiter_task->pi_lock);
+rt_mutex_dequeue(lock, waiter);
+waiter_task->pi_blocked_on = NULL;
+raw_spin_unlock(&waiter_task->pi_lock);
 
-## [2.1] futex PI chain-1:EDEADLK 回滚
+rt_mutex_adjust_prio_chain(/* 分支相关参数 */,
+                           waiter_task);
+```
 
-原语域的 futex 侧构造确定性的 walk 前状态。基础构造是以 FUTEX_CMP_REQUEUE_PI 驱动的优先级继承链:
+不要直接复制这段示意签名；stable 与 Android 厂商分支在 `rt_mutex_base` 类型、参数顺序、锁 helper 和 guard 风格上可能不同，应审查真实上游提交。
 
-- **闭环条件**:requeue 返回 -EDEADLK(errno 35)——内核检测到潜在环,回滚操作——且回滚在目标字留下 WAITERS 位。
-- **判据**:errno 35 + 目标字 after 值带 WAITERS 位,每轮双打印。
-- **实测**:谱系每一轮。
+## 后续回归：部分初始化
 
-意义:EDEADLK 回滚是一次内核执行的遍历,其副作用(waiter 链表状态)可从用户空间经后续 futex 返回观测。这是计划第一次让内核走过一段由计划撰写的结构。
+清理改为解引用 `waiter->task` 后，另一个不变量变得必须显式保证：到达 `remove_waiter()` 的所有路径都已经初始化该字段。非 top requeue waiter 的自死锁错误可能在赋值前提前返回。CVE-2026-53166 的后续修复用于阻止这种路径携 NULL waiter task 进入清理。
 
-## [2.2] chain-2 / chain-3:环闭合
+因此完整回移集必须包含两个概念：
 
-第二条 EDEADLK 链经 WAITERS 位握手闭合 waiter 环——被阻塞 waiter 从 requeue 醒来本身就是判据行。首次闭合轮次之后,每轮复现。
+- CVE-2026-43499：选择正确任务；
+- CVE-2026-53166：在该任务尚不存在时，不进入正确任务清理。
 
-闭合的环使阶段 3.1 确定化:最终重定优先级恰好只有一个明确定义的 walk 要执行,walk 前状态全部就位(内容经 [2.3] 撰写,堆形状经 [1.4] 钉住)。
+## 源码审查判定表
 
-## 复用性
+| 厂商树观察 | 判定 |
+| --- | --- |
+| 共享 `remove_waiter()` 中出现 `current->pi_lock` / `current->pi_blocked_on` | 存在受影响语义模式 |
+| 局部 `waiter_task = waiter->task`，并统一用于加锁、清零和链调整 | 主修复已存在 |
+| 代理清理前检查 requeue 自死锁，或有等价的初始化证明 | 后续保护已存在 |
+| 只有内核版本号 | 证据不足 |
 
-- [2.3] 入口路径特定(本内核构建的 compat setsockopt)但方法通用:对任何内核,配方是"找一条目的帧深稳定的 compat 拷贝路径,以 dump payload 验证逐字节性,然后撰写内容"。
-- [2.1]/[2.2] 是语义级(futex PI),非 gadget 级:用的是有文档的内核语义,不依赖特定构建地址。
+## 验证矩阵
+
+在带检测器的工程内核上覆盖普通加解锁、requeue 成功、回滚、超时、信号中断、owner 退出、top/non-top waiter 与自死锁。每个退出点都检查正确 `pi_lock`、`pi_blocked_on` 清理、任务引用平衡、RB 树缓存一致，并确认无 lockdep/KASAN/KCSAN 报告。
+
+## 参考资料
+
+- [上游提交 3bfdc63936dd](https://git.kernel.org/linus/3bfdc63936dd4773109b7b8c280c0f3b5ae7d349)
+- [CVE-2026-43499 描述与修复版本跟踪](https://security-tracker.debian.org/tracker/CVE-2026-43499)
+- [CVE-2026-53166 后续问题](https://access.redhat.com/security/cve/cve-2026-53166)

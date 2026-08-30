@@ -1,80 +1,64 @@
-# Stage 0 — Observation Infrastructure
+# 01 — Observation, Provenance, and Lab Safety
 
-The subject of this stage is not the kernel. It is the measurement
-apparatus: without it, no claim about kernel behavior on a production
-Android device can be falsified.
+[简体中文](zh-CN/01-observation.md) · [Project home](../README.md)
 
-## The problem
+## Outcome first
 
-On this device (vivo iQOO Z8, kernel 5.10.233, Android 15, SELinux
-Enforcing, shell uid 2000), every standard kernel diagnostic channel is
-closed to the unprivileged shell:
+Kernel results are credible only when the team can prove **what ran, where it ran, and what was observed before failure**. The observation system is therefore part of the security boundary. It must not require opaque preload objects or grant an unreviewed artifact access to a developer workstation, personal phone, signing key, or authenticated ADB session.
 
-- `pstore` / console / kmsg: permission-denied across every access path
-  tried.
-- `kptr_restrict`: no symbol address reads.
-- Kernel panics end the round; whatever was in flight is lost unless it
-  was already on disk.
+## Safe laboratory baseline
 
-So the research program built its own channels first.
+- Use a dedicated device with a recoverable factory image and no personal data, SIM, accounts, credentials, or production network access.
+- Before the first run, obtain the exact factory/OTA recovery package where legally and technically available, confirm how to enter the model's normal reboot and recovery menus, charge the battery, and preserve any unlock/recovery credentials required by the owner.
+- Place the host and device on an isolated network. Disable unnecessary outbound connectivity.
+- Build from reviewed source in a disposable environment; record source commit, compiler/toolchain identity, configuration, and output digest.
+- Do not run attachments from issues or chat. An `LD_PRELOAD` library executes before the nominal program's `main()` and can falsify logs as well as compromise the host process.
+- Collect only the minimum logs needed. Redact serials, boot IDs, absolute runtime addresses, tokens, and user data before publication.
 
-## [0.1] Automated build & deploy pipeline
+For a freeze or black screen, use the official vivo force-restart procedure referenced in the root README: on current full-screen models, hold Power + Volume Down together for more than 10 seconds. A forced restart is a first recovery step, not proof that no damage occurred. Do not choose data-wipe or flashing entries merely because a recovery menu appears.
 
-The full loop — source edit, commit, cloud CI build (Android NDK r29),
-artifact download with SHA256 identity check, device deployment via
-adb, per-round device reboot for a clean boot state, test launch — runs
-with no manual step. Each round's preflight prints the artifact hash so
-that a mismatch between "what was built" and "what ran" is detectable
-before the round counts.
+## Evidence chain
 
-The two published probes build through the same pipeline
-(`mcast-test-z8`, `sched-test-z8` CI artifacts).
+Each test round should bind the following fields:
 
-## [0.2] TCP microsecond probe channel
+| Field | Why it matters |
+| --- | --- |
+| Device/build identity | Prevents results from being assigned to the wrong OTA or vendor branch |
+| Source commit and dirty-tree state | Makes the tested logic reviewable |
+| Toolchain and configuration | Explains ABI, CFI, sanitizer, and layout differences |
+| Artifact SHA-256 | Detects substitution between build and execution |
+| Boot identity and monotonic timestamps | Separates rounds without publishing stable device identifiers |
+| Predeclared pass/fail criterion | Prevents post-hoc interpretation |
+| Panic/oops evidence | Distinguishes timeout, userspace failure, and kernel failure |
 
-The on-device harness connects back to the host over an adb-reversed
-TCP socket (port 18080) and emits a marker line per milestone:
+A digest authenticates equality to a known artifact; it does not establish that the artifact is benign. Review and reproducibility come first.
 
-- `CONN` — reverse tunnel established
-- `EARLY` — pre-geometry milestones
-- `HELLO` — payload armed, pre-fire state reached
-- `FIRE` — trigger issued
+## Supplied run: bounded interpretation
 
-Each marker carries a timestamp, giving microsecond-scale relative
-timing of the whole round from the host side. The decisive property:
-the channel is a plain TCP connection owned by a userspace process, so
-it survives kernel-side trouble long enough to report that trouble —
-rounds in which the kernel died shortly after the fire stage still
-delivered their final markers to the host log.
+The supplied transcript reaches `route-summary ... route_done=1` and then prints `uid=2000(shell)` in `u:r:shell:s0`, matching the unprivileged startup identity. It is therefore a valid positive criterion for “the observation/route artifact completed and returned without privilege elevation” on that round. It is not evidence of root, of general binary safety, or of behavior on another build. Because startup records `enforce=0`, no SELinux transition can be attributed to this run.
 
-## [0.3] O_DSYNC diagnostic persistence
+Target gating must be tested independently. The observed device tuple is PD2314/V2314A, `k6895v1_64`, `mt6895`, `arm64-v8a`, display build `PD2314_A_15.2.18.0.W10`, and kernel release `5.10.233-android12-9-g44ec642832da-dirty`. The artifact's printed profile label names `15.2.17.1`, so exact-version refusal is not proven by the positive run. Add pre-probe fail-closed checks and negative criteria: mismatched model, board, platform, display build, fingerprint, kernel release, ABI, or unavailable property must terminate before active probing.
 
-The harness's diagnostic log file is opened with `O_DSYNC`: every write
-is flushed to storage before the next statement executes. There is no
-buffered log that dies with the kernel. After a panic-induced reboot,
-the log is pulled (dual pull at T+120s and T+180s after fire) and
-contains every line written before death — including the last one.
+## Failure-resilient logging
 
-Together [0.2] and [0.3] close the loop: the host-side probe log tells
-you *when* things happened at microsecond resolution, and the
-device-side O_DSYNC log tells you *what* happened up to the last
-surviving statement.
+Use two independent channels in engineering labs:
 
-## Environment facts (measured)
+1. A low-latency host channel for milestones and timing.
+2. A write-through local record for the last completed state before a crash.
 
-| Item | Value |
-|---|---|
-| Device | vivo iQOO Z8 (PD2314 / V2314A) |
-| SoC | MediaTek Dimensity 8200 (MT6895) |
-| Kernel | 5.10.233-android12-9 (MTK vendor tree) |
-| Android | 15 (SDK 35) |
-| SELinux | Enforcing |
-| Runtime identity | uid=2000 (shell) |
-| VA_BITS | 39 |
-| perf_event_paranoid | ≤ 1 (unprivileged sampling allowed) |
-| 32-bit support | armeabi-v7a in abilist (compat syscall paths reachable) |
-| Kernel config | CFI enabled; SLAB freelist hardening + randomization |
+Neither channel should contain secrets or be enabled in production. A successful syscall return is evidence only for that return condition; it does not prove internal memory safety. Conversely, a missing line is not automatically a kernel panic unless the host transport and userspace process state are independently known.
 
-These are the preconditions the published stages rely on. The two most
-load-bearing ones: unprivileged perf sampling (feeds [1.1]) and 32-bit
-compat syscall reachability (feeds [2.3]).
+## Recommended diagnostic builds
+
+When source control is available, validate the repair with separate engineering kernels enabling the relevant combinations of lockdep, debug rtmutex support, KASAN, KCSAN, UBSAN, and fault-injection facilities that the vendor build can tolerate. Keep these builds off production devices because instrumentation changes timing and performance.
+
+Useful assertions focus on invariants rather than attacker-controlled geometry:
+
+- A task returning from a PI wait path has `pi_blocked_on == NULL` unless it remains genuinely blocked.
+- The task whose PI fields are changed is the task whose `pi_lock` is held.
+- A waiter removed from both RB trees is no longer discoverable through `rb_leftmost`.
+- Early-error cleanup accepts a waiter with only the fields guaranteed initialized at that point.
+
+## Publication rule
+
+Publish source excerpts, minimized traces, symbolic offsets, and validation matrices. Do not publish live device addresses, opaque payloads, prebuilt preload libraries, or a sequence that converts the lifetime bug into a privilege-changing primitive.

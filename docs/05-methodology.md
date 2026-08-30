@@ -1,97 +1,70 @@
-# Methodology — How the Claims Were Made
+# 05 — Evidence Methodology and Safe Validation
 
-The most reusable artifact of this program is not any single result;
-it is the discipline under which results were produced. This document
-is that discipline, written down.
+[简体中文](zh-CN/05-methodology.md) · [Project home](../README.md)
 
-## Three evidence tiers
+## Evidence grades
 
-Every conclusion in the program carries one of exactly three grades.
-There is no middle state.
+| Grade | Meaning | Permitted conclusion |
+| --- | --- | --- |
+| A1 | Direct observation with artifact/build identity and a predeclared criterion | Supports a claim for that exact image and configuration |
+| A2 | Static analysis, cross-reference, or indirect runtime inference | Supports design and review, not a standalone runtime claim |
+| B | Unverified, ambiguous, or outside the collected evidence | Must be stated as unknown |
 
-| Tier | Definition | Authority |
-|---|---|---|
-| **A1** | Direct runtime observation, with a self-certifying log line present in the round | May support design and execution decisions on its own |
-| **A2** | Indirect inference: elimination, cross-document reasoning, single-source static deduction | May never support a design or a launch alone; must be labeled when cited |
-| **B** | Unprobed: not examined, or the evidence chain is not closed | Forbidden as a basis for any action |
+Static disassembly can prove that an instruction reads `task+0x898`; it cannot prove that a particular interleaving reached that instruction. A successful lab trigger can prove reachability on that build; it cannot prove all kernels carrying the same version string are affected.
 
-Two hard rules:
+## Criterion-first workflow
 
-- The only path from A2 to A1 is a dedicated criterion round designed
-  to observe the thing directly.
-- "Unprobed" is not "nonexistent." Blind spots are declared, never
-  silently treated as absences.
+1. State the invariant or branch to be tested.
+2. Define a minimally sufficient, non-privilege-changing observation.
+3. Record exact source and build identity.
+4. Change one independent variable.
+5. Run repeated rounds on an isolated engineering device.
+6. Preserve both positive and negative outcomes.
+7. Promote the claim only to the evidence grade actually earned.
 
-## Criterion-first
+## Binary-analysis discipline
 
-Before any node is exercised, its observation channel must exist and
-be closed. A round whose success criterion cannot be read out in-round
-is not a legal round. When a channel breaks, the only legitimate
-priority is repairing the channel — running rounds against an unread
-criterion is noise generation, and noise laundered into "results" is
-the specific failure mode this discipline exists to prevent.
+- Anchor function starts with ELF symbols/kallsyms, then decode the exact image.
+- Express both absolute and function-relative addresses, while avoiding live runtime addresses in public logs.
+- Treat decompiler output as navigation; use machine instructions for constants, offsets, widths, signs, and branch conditions.
+- Cross-check a field with independent producers and consumers where possible.
+- Infer structure size from object boundaries only when stack slots, call convention, and adjacent data are unambiguous.
+- Mark missing DWARF/BTF explicitly; do not silently import a vanilla layout into a vendor image.
 
-Stage 0 is the physical expression of this rule: [0.2] and [0.3]
-existed before any kernel claim, so that every later claim had a
-witness that survives kernel death.
+## Patch-review discipline
 
-## Single-variable rounds
+Review the repair as an invariant transformation:
 
-A legal test round changes exactly one thing, and that thing is the
-round's adjudication target. Multi-variable rounds have no attribution
-power — if two things changed and the outcome changed, nothing was
-learned about either.
+| Before | After |
+| --- | --- |
+| Execution context chooses the cleanup task | Waiter ownership chooses the cleanup task |
+| Wrong task's `pi_lock` may be held | Real waiter's `pi_lock` is held |
+| Real task can retain stale `pi_blocked_on` | Real task is cleared before waiter lifetime ends |
+| Chain adjustment receives `current` | Chain adjustment receives `waiter_task` |
+| Partial initialization not separately guarded | Self-deadlock/early-error precondition is checked |
 
-Paired with this: **pre-registered decision tables**. Before a round,
-every branch outcome is written down as a binary verdict with its
-follow-up action. A round whose outcome space was not pre-registered
-cannot produce a conclusion, because the conclusion would be chosen
-after the fact.
+Do not accept a backport only because it applies cleanly. Android vendor trees frequently change rtmutex types, function signatures, trace hooks, and locking wrappers.
 
-## Node stability
+## Regression coverage
 
-A research claim is tracked as a node with an explicit closure
-condition. A node is STABLE only when:
+The minimum matrix includes:
 
-1. the closure condition was written before the certifying rounds;
-2. the runtime criterion passed in at least **three consecutive
-   rounds**;
-3. the reproduction path is documented precisely enough that a
-   different session (different person, different day) can re-run it;
-4. the claim is **mechanism-level**: it survives redesign of every
-   higher stage, so downstream work never inherits a rotten floor.
+- ordinary PI lock acquisition and release;
+- proxy requeue success and rollback;
+- timeout and signal interruption;
+- owner exit/recovery paths;
+- top and non-top waiters;
+- nested donation chains;
+- self-deadlock before and after waiter initialization;
+- scheduler policy/priority changes while PI state is active;
+- CPU migration and cancellation stress where supported.
 
-Static analysis can inform design. It can never mark a node STABLE —
-a disassembly shows what code looks like, not what it does at runtime
-under a specific interleaving.
+For every case, verify return semantics, no stale `pi_blocked_on`, correct task lock ownership, consistent cached RB roots/leftmost pointers, balanced references, and clean lockdep/KASAN/KCSAN output.
 
-## The chain-legality rule
+## Publication discipline
 
-A test round is legal only if every premise it relies on is already
-STABLE. If a premise is unsettled, the premise's adjudication round
-comes first. This outlaws the most seductive failure in exploit
-research: "we'll find out what the earlier stage did by looking at
-what the later stage did" — which multiplies unknowns instead of
-resolving them.
+Security documentation should make repairs reproducible without making privilege escalation turnkey. Include root cause, invariants, source-level remediation, affected-code detection, and safe regression tests. Exclude operational memory-reclamation schedules, forged kernel objects, live targets, privilege modification, and prebuilt executable payloads.
 
-## Mandatory write-back
+## Interpreting uncertainty
 
-A round that is not written back to the tracking documents does not
-exist — its results may not be cited by any later round. Five fields
-per recorded result: what was attempted, on what evidence grade, where
-the evidence lives, what the outcome was, and what it changed.
-
-## Why this matters beyond this project
-
-Exploit research fails in a characteristic way: enthusiasm converts
-weak signals into confident narratives, the narratives acquire
-dependencies, and the whole structure collapses when one load-bearing
-"fact" turns out to be an untested assumption. The discipline above is
-the countermeasure: claims are graded at birth, criteria precede
-exercise, one variable moves at a time, verdicts are pre-registered,
-and floors must be stable before anything stands on them.
-
-Applied rigorously, it converts exploit research from storytelling
-into an evidence system — which is the difference between "we believe
-the walk consumed the geometry" and "ret2 = 0, eighteen consecutive
-rounds, logs attached."
+“Not confirmed” is a useful result. Typical reasons include missing vendor source, absence of DWARF/BTF, an inlined helper with no stable symbol boundary, or insufficient runtime instrumentation. Record which evidence would close the gap; do not fill it with an upstream assumption.

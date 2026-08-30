@@ -1,82 +1,48 @@
-# Stage 1 — Information-Leak Domain
+# 02 — Information Exposure and Attack-Surface Reduction
 
-Four capabilities, all pure reads, all leaving the system healthy.
-Together they answer: *where is the kernel, where are the objects we
-care about, and where can we stage controlled data.*
+[简体中文](zh-CN/02-information-leak.md) · [Project home](../README.md)
 
-## [1.1] KASLR text base via perf_event sampling
+## Outcome first
 
-The kernel text base is disclosed from unprivileged
-`perf_event_open`-based timing samples. The general idea of
-perf-side-channel KASLR disclosure is known in the literature; the
-engineering contribution here is reliability.
+Address disclosure is an **amplifier**, not the rtmutex root cause. Fixing CVE-2026-43499 remains mandatory. Restricting perf, debug filesystems, vendor diagnostics, and address-bearing logs reduces reliability and observability available to an attacker and limits damage from future memory-safety bugs.
 
-**The single-anchor trap.** A derivation anchored on one sample point
-is probabilistically wrong on a measurable fraction of boots. Worse, a
-wrong derivation is not obviously wrong: the derived base can be off
-by megabytes while remaining a plausible-looking kernel address. A
-wrong base silently poisons every downstream address computation.
+## Exposure classes
 
-**The voting fix.** The toolkit (`exploit/src/kernelsnitch/`) takes
-multiple independent samples, derives candidate bases, and votes. The
-round continues only on a decisive majority. Measured results:
+| Surface | Intended purpose | Production risk | Defensive action |
+| --- | --- | --- | --- |
+| `perf_event_open` and PMU sampling | Profiling and performance diagnosis | Timing or instruction-pointer correlated data may weaken KASLR | Set a restrictive policy; grant access only to trusted profiling domains |
+| debugfs/tracefs/kprobes | Kernel development and tracing | Kernel addresses, object identities, and privileged control paths | Do not mount for untrusted domains; enforce SELinux and capabilities |
+| Vendor debug nodes | Device/SoC diagnosis | Often expose implementation-specific logs or memory windows | Remove from production builds or require a narrowly scoped privileged domain |
+| `/proc`, sysctls, panic logs | Operations and postmortem analysis | Stable pointers and build details improve address inference | Apply pointer restrictions and redact exported diagnostics |
+| Build artifacts and symbol maps | Crash triage | Exact offsets enable binary matching | Control distribution; publish only what disclosure policy permits |
 
-- gate verdict PASS with score 0.905–1.000 on fourteen consecutive
-  rounds;
-- 100% pass across the validation batch after voting was adopted.
+## KASLR is not a memory-safety boundary
 
-**Instrumentation notes.** The sampling side also performs batch-pacing:
-waiter-thread batches are spawned in bounded groups with inter-batch
-traversal-time probes (128x `FUTEX_WAKE_BITSET` with disjoint bitsets —
-timing only, zero actual wakeups), exiting early when traversal time
-exceeds a baseline multiple. This keeps the sampling pass itself from
-destabilizing the system it measures.
+KASLR raises uncertainty. It does not make a stale pointer safe and must not be credited as remediation. A secure review therefore records two separate statuses:
 
-## [1.2] Kernel symbol anchors by differential derivation
+- **Semantic status:** is the wrong-task cleanup fixed?
+- **Exposure status:** can an untrusted process obtain address-correlated information?
 
-`kallsyms` is unreadable on this device (kptr_restrict). Symbol
-addresses are instead derived from disclosed anchors plus fixed
-deltas: the offsets *between* symbols are build constants, so knowing
-one anchor address yields the others by addition.
+Closing the second while leaving the first open is defense in depth only. Conversely, fixing the lifetime bug does not justify leaving broad debug access enabled.
 
-- Input: the text base from [1.1] and measured anchor addresses.
-- Output: addresses of selected .data-section symbols the later stages
-  reason about.
-- Criterion: the per-round geometry log prints derived values; they
-  match the differential prediction on every round after the anchor
-  arithmetic was locked down.
+## Device-specific review points
 
-This is a general technique for restricted-kallsyms environments and
-the reason the whole program never needed a symbol-table read.
+The supplied laboratory logs indicate that performance sampling and vendor/debug facilities were reachable in the tested configuration. That observation is build- and policy-specific. A production audit should verify the effective state on the shipping image rather than copying lab assumptions:
 
-## [1.3] Physical page disclosure and controlled staging
+- actual `perf_event_paranoid` behavior and SELinux domain permissions;
+- whether debugfs and tracefs are mounted and accessible to shell/app domains;
+- whether vendor nodes under debug paths disclose kernel addresses or permit arbitrary-position reads/writes;
+- whether crash, trace, or telemetry output prints unmasked pointers;
+- whether engineering properties accidentally persist in release builds.
 
-A leak primitive discloses the physical page backing a kernel
-allocation. The disclosed page is then prepared as a staging area: the
-user side controls the page's full contents. The harness prints the
-page base each round; verification reads back staged content.
+## Hardening acceptance criteria
 
-What this buys: a region of kernel-visible memory whose *contents* are
-fully attacker-chosen and whose *address* is known. The published
-boundary ends before any consumer of that staging area beyond the
-walk-time geometry of stage 2/3.1.
+1. An ordinary application and ADB shell cannot open privileged perf events or kernel-address-bearing trace sources unless product requirements explicitly allow it.
+2. Production SELinux policy denies vendor debug nodes to untrusted domains.
+3. Release builds do not expose generic kernel-memory windows through debug handlers.
+4. Pointer-bearing telemetry is masked or removed outside authenticated engineering modes.
+5. Any exception is documented with an owner, threat model, and automated regression test.
 
-## [1.4] Spray residency
+## Safe validation
 
-Sixteen ordered sk_buff allocations of 65,536 bytes each, placed and
-retained via the unix-socket order-3 spray family. Criterion: all
-sixteen sends report 65536 bytes accepted — measured 16/16 on every
-round.
-
-Purpose: heap-shape control. Keeping the sprayed objects resident pins
-the allocator layout the later stages reason about, so that the
-geometry staged in [1.3] stays put through the timing window of
-stage 2/3.1.
-
-## Why this domain matters
-
-Stages [1.1]–[1.4] are pure reads plus heap shaping: the system is
-healthy and identical before and after. They are also the
-mechanism-independent foundation — nothing here assumes anything about
-how the later stages consume the disclosed information, so the whole
-domain survives redesign of everything above it.
+Validate permissions and data classification, not exploitability. Use a minimal program that attempts to open the intended diagnostic interface and records only success/failure and sanitized metadata. Do not combine the check with heap shaping, PI manipulation, or privilege-changing behavior.

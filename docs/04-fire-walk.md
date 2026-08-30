@@ -1,72 +1,91 @@
-# Stage 3.1 — Fire: the PI Walk Executes and Returns
+# 04 — PI Priority Propagation: The Later Consumer
 
-The published boundary of this repository. Everything before this line
-is preparation; this stage is the kernel *consuming* the prepared
-geometry, and the proof that it does so and comes back.
+[简体中文](zh-CN/04-fire-walk.md) · [Project home](../README.md)
 
-## The trigger
+> The historical filename is retained for link compatibility. This document explains a legitimate scheduler mechanism that consumes corrupted state; it does not document a trigger sequence.
 
-`sched_setattr` on the ring-head task re-prioritizes it. Under futex
-priority-inheritance semantics, a re-prioritized task that is blocked
-on a PI chain forces the kernel to walk the chain: adjust priorities
-upward through the waiter structure, rebalance the waiter tree, and
-propagate the change through the ring closed in [2.2].
+## Conclusion
 
-Reachability of the trigger syscall from the shell domain is verified
-by the published `sched_test` probe (one syscall, delimited result
-block). The probe exists precisely so this claim is checkable without
-any of the unpublished harness.
+The priority-chain walk is not a second root bug. It is the normal mechanism that makes priority inheritance correct across nested locks. The defect from [03](03-stack-write.md) becomes dangerous because the walk later treats `task->pi_blocked_on` and cached waiter trees as authoritative kernel-owned state.
 
-## What "fire" means mechanically
+## Why propagation is required
 
-At the moment of the trigger:
+Suppose high-priority task H waits on a lock held by low-priority task L. PI temporarily boosts L so it can release the lock promptly. If L is itself blocked on a lock held by M, boosting only L is insufficient; the donation must continue to M. This recursive correction is the purpose of `rt_mutex_adjust_prio_chain()`.
 
-- [1.1] has fixed the kernel text base (KASLR defeated by voting);
-- [1.2] has derived the symbol addresses the harness reasons about;
-- [1.3] has staged a fully user-authored page at a known kernel
-  address;
-- [1.4] has pinned the heap shape around it;
-- [2.1]/[2.2] have closed a deterministic waiter ring with observable
-  intermediate states;
-- [2.3] has stamped byte-exact content onto the deep-stack slot the
-  walk will traverse.
+```mermaid
+flowchart LR
+    H["H waits"] --> L["L owns lock<br/>receives donation"]
+    L --> M["L waits on M<br/>donation propagates"]
+```
 
-The trigger then asks the kernel to walk. The walk reads the staged
-geometry from the stamped stack region and the staged page, performs
-its priority propagation, completes, and control returns to userspace.
+Lock/unlock, timeout, signal cleanup, ownership changes, and task priority/policy changes can all require recalculation. These are legitimate events, not vulnerability behavior.
 
-## The criterion
+## Task-side PI model in the supplied image
 
-The harness prints the trigger's return code. **ret2 = 0 is the pass
-line**: the walk ran to completion and returned.
+| Offset | Field meaning | Consumer role |
+| --- | --- | --- |
+| `task+0x84` | effective priority | Compare/update donation order |
+| `task+0x360` | deadline key | Tie-break deadline entities |
+| `task+0x86c` | `pi_lock` | Protect task PI state |
+| `task+0x880` | `pi_waiters.rb_root.rb_node` | Empty/root check |
+| `task+0x888` | `pi_waiters.rb_leftmost` | Cached highest-priority waiter |
+| `task+0x890` | `pi_top_task` | Current top donor selected by scheduler |
+| `task+0x898` | `pi_blocked_on` | Continue propagation to the next lock |
 
-- **Evidence**: eighteen consecutive rounds of the automation lineage,
-  plus every round of the later validation batches.
+The structure layout used to interpret those trees is documented in [06](06-static-analysis.md).
 
-## What this stage does and does not claim
+## Instruction-level consumption
 
-"The walk ran to completion" is a precise, bounded claim. It is the
-published milestone: kernel-side consumption of user-authored
-geometry, with a clean return, reproducibly.
+At entry to one chain step, the function reads the current task's blocked-on waiter:
 
-What it deliberately does not cover:
+```asm
+rt_mutex_adjust_prio_chain (rel 0x225C68)
++0x00d8  ldr  x28, [x19, #0x898]  // task->pi_blocked_on
+```
 
-- the consequences of the walk for objects adjacent to the staged
-  geometry;
-- any post-walk stage, in any direction.
+It then tests the owner's cached PI waiter tree and converts the cached leftmost RB node back into its enclosing waiter. In this image, the subtraction constant is exactly `0x18` because `pi_tree_entry` is at waiter offset `+0x18`:
 
-This is where the repository stops. The boundary is not rhetorical —
-the code is physically cut at it, the build system builds nothing
-beyond the two reachability probes, and the symbol/offset tables the
-unpublished stages would need are absent from the tree.
+```asm
+rt_mutex_adjust_prio_chain
++0x0104  add  x8, x19, #0x880
++0x0108  ldar x8, [x8]             // cached tree root
++0x010c  cbz  x8, ...
++0x0110  ldr  x8, [x19, #0x888]   // rb_leftmost
++0x0114  sub  x8, x8, #0x18       // enclosing waiter
+```
 
-## Why stop here as a publication
+After tree maintenance, it derives the top waiter task and recalculates effective scheduling priority:
 
-Stages 0–3.1 form a closed, self-contained, and individually
-verifiable corpus: measurement infrastructure, information disclosure,
-a byte-exact write primitive, and a demonstrated kernel-side walk over
-authored state. Each piece is independently checkable by a third party
-with the same device and the published probes. That corpus has
-defensive value on its own — every stage it demonstrates is a surface
-a hardened kernel should close, and the methodology generalizes beyond
-this specific chain.
+```asm
+rt_mutex_adjust_prio_chain
++0x115c  add  x8, x19, #0x880
++0x1160  ldar x8, [x8]
++0x1164  cbz  x8, ...              // empty tree selects NULL donor
++0x1168  ldr  x8, [x19, #0x888]
++0x116c  ldr  x1, [x8, #0x18]     // pi_node + 0x18 == waiter->task
++0x1170  mov  x0, x19
++0x1174  bl   rt_mutex_setprio
+```
+
+An empty tree does not suppress the call; it supplies a NULL donor so the owner can return toward normal priority.
+
+## How stale state is re-consumed
+
+Under the broken cleanup invariant, a task may return from the proxy wait path while `pi_blocked_on` still refers to a waiter that lived on a completed kernel stack frame. Later priority recalculation reads that pointer as if the task were still blocked. The walk can then:
+
+- interpret reused bytes as waiter fields;
+- follow a lock or owner relationship that never existed;
+- rebalance RB-tree state using inconsistent membership;
+- pass an unintended donor task to `rt_mutex_setprio()`.
+
+The exact consequence depends on memory reuse and interleaving. The repair should therefore eliminate the stale producer rather than add ad-hoc pointer range checks to every consumer.
+
+## `rt_mutex_setprio()` and CFI
+
+In this image, the selected effective priority chooses deadline (`w25 < 0`), real-time (`0..99`), or fair (`>99`) scheduling. The scheduler writes one of three static `sched_class` objects to `task+0x98`. CFI validates later indirect callback targets; it does **not** prove that the task, waiter, RB node, or scheduling-class pointer was obtained from a live object. A bad structure pointer may fault before CFI is reached.
+
+## Repair rationale
+
+Once `remove_waiter()` clears the real waiter's `pi_blocked_on` under the real waiter's `pi_lock`, the later walk sees no blocked-on edge to follow. That restores the abstraction boundary: propagation can continue to trust kernel-owned PI state without expensive lifetime validation at every read.
+
+Hardening assertions in debug builds are still valuable, but the production fix belongs at the cleanup site that violates the invariant.

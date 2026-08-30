@@ -1,93 +1,102 @@
-# Stage 2 — The Deep-Stack Write Primitive
+# 03 — Root Cause: Futex PI Proxy-Waiter Lifetime
 
-The star result of the published program: a **byte-exact, 260-byte,
-attacker-authored write into a predictable slot of the calling task's
-own kernel stack**, through a compat syscall path that production
-Android kernels keep reachable for unprivileged apps.
+[简体中文](zh-CN/03-stack-write.md) · [Project home](../README.md)
 
-## [2.3] The tree stamp primitive
+> The historical filename is retained for link compatibility. This document describes the lifetime defect and repair, not a write primitive.
 
-### Entry point
+## Conclusion
 
-A 32-bit (armeabi-v7a) task calls:
+The repair is necessary because `remove_waiter()` serves two semantic contexts:
 
-```c
-setsockopt(fd, IPPROTO_IPV6 /* 0x29 */,
-           MCAST_JOIN_SOURCE_GROUP /* 0x2e */, buf, 260);
+1. ordinary rtmutex slow-lock cleanup, where the executing task normally owns the waiter; and
+2. futex requeue-PI proxy-lock rollback, where one task may operate on a waiter belonging to another.
+
+The old implementation used `current`. That works accidentally in the first context but violates task identity in the second. The authoritative identity is `waiter->task`.
+
+## Why proxy locking exists
+
+A PI futex combines a userspace futex word with an in-kernel rtmutex. Requeue-PI can move a waiting task from a non-PI wait queue to a PI futex without waking it into an uncontrolled race. Kernel code therefore performs a **proxy** operation: the current requeuer manipulates locking state on behalf of the actual waiting task.
+
+That distinction is fundamental:
+
+| Role | Meaning |
+| --- | --- |
+| `current` | Task executing the requeue/rollback code |
+| `waiter->task` | Task represented by the rtmutex waiter |
+| lock owner | Task currently receiving priority donation |
+
+These can be three different tasks. A helper reused across ordinary and proxy paths must not infer waiter ownership from execution context.
+
+## Normal PI state
+
+For each task:
+
+- `pi_blocked_on` points to the live waiter on which the task is blocked;
+- `pi_waiters` is a cached RB tree of waiters donating priority to this task as a lock owner;
+- `pi_lock` serializes mutations of that task's PI state.
+
+The key lifetime rule is:
+
+```text
+task->pi_blocked_on != NULL
+    implies waiter is live, belongs to task, and task is genuinely blocked.
 ```
 
-The kernel copies the 260-byte group-source filter structure from user
-memory into kernel memory on the way to validating it. Reachability of
-the path is verified by the published `mcast_test` probe (one syscall,
-delimited result block).
+When a waiter is removed because of rollback, timeout, signal, or acquisition, the pointer must be cleared before the waiter storage can disappear.
 
-### Why 32-bit compat matters
+## The failing cleanup
 
-The copy lands in a stack frame whose depth depends on the syscall
-entry path. The compat path — a 32-bit caller entering a 64-bit kernel
-— has a distinct, deeper frame chain than the native path. The stack
-slot of the copy is fixed for a given kernel build and entry path; on
-this kernel it is deep in the calling task's kernel stack, at an
-offset the harness verifies every round.
+In the affected proxy rollback, `waiter->task != current`. Cleanup against `current` produces three related errors documented by the upstream fix:
 
-### The proof: byte-exact readback
+1. waiter-tree removal occurs without holding the real waiter's `pi_lock`;
+2. the real waiter task's `pi_blocked_on` is not cleared, leaving a dangling pointer after stack lifetime ends;
+3. `rt_mutex_adjust_prio_chain()` receives the wrong top-task identity.
 
-The harness stamps a fully attacker-authored 260-byte payload (32
-qwords plus tail) through the primitive and then dumps the target
-stack region:
+The bug is therefore not “the scheduler writes too much.” It is an **ownership and lifetime violation** created during cleanup. Later scheduler code merely trusts state that should have been made impossible.
 
-- **Criterion (BUFFER DUMP)**: the dumped 32 qwords match the
-  constructed payload byte for byte.
-- **Evidence**: every round of the lineage.
+## Semantic repair
 
-This is the point where the write stops being "a kernel bug that
-copies too much" and becomes an engineering primitive: fixed
-destination, fixed size, arbitrary content, repeatable on demand.
+The vendor implementation must be adapted to the exact branch/API, but all three task-sensitive operations must use the same `waiter_task`:
 
-### Where the name comes from
+```c
+/* Schematic only; use the exact upstream/vendor backport. */
+struct task_struct *waiter_task = waiter->task;
 
-The destination slot sits in the region the futex priority-inheritance
-machinery later walks through (see [2.1]/[2.2] below) — the primitive
-"stamps" content onto the tree-consumption path. The combination of
-[1.3] (a controlled staging page) and [2.3] (a byte-exact deep-stack
-copier) is what allows the walk-time geometry to be authored on the
-user side.
+raw_spin_lock(&waiter_task->pi_lock);
+rt_mutex_dequeue(lock, waiter);
+waiter_task->pi_blocked_on = NULL;
+raw_spin_unlock(&waiter_task->pi_lock);
 
-## [2.1] Futex PI chain-1: EDEADLK rollback
+rt_mutex_adjust_prio_chain(/* branch-specific arguments */,
+                           waiter_task);
+```
 
-The futex side of the primitive domain builds a deterministic
-pre-walk state. The base construct is a priority-inheritance chain
-driven with `FUTEX_CMP_REQUEUE_PI`:
+Review the actual upstream commit rather than copying this schematic signature: stable and Android vendor branches differ in `rt_mutex_base` types, argument order, locking helpers, and guard style.
 
-- **Closure condition**: the requeue returns `-EDEADLK` (errno 35) —
-  the kernel detects a would-be cycle, rolls the operation back — and
-  the rollback leaves the WAITERS bit set on the target word.
-- **Criterion**: errno 35 plus the after-value of the target word
-  carrying the WAITERS bit, both printed per round.
-- **Evidence**: every round of the lineage.
+## Follow-up regression: partial initialization
 
-The significance: EDEADLK rollback is a *kernel-executed* traversal
-whose side effects (waiter-list state) are observable from user space
-through subsequent futex returns. It is the first point where the
-program gets the kernel to walk a structure the program authored.
+Changing cleanup to dereference `waiter->task` exposes another required invariant: every path reaching `remove_waiter()` must have initialized that field. A self-deadlock error can return early before assignment for a non-top requeued waiter. The follow-up tracked as CVE-2026-53166 prevents that path from calling cleanup with a NULL waiter task.
 
-## [2.2] Chain-2 / chain-3: ring closure
+This is why a correct backport set contains both concepts:
 
-A second EDEADLK chain closes the waiter ring via WAITERS-bit
-handshakes — the blocked waiter's wake from the requeue is itself the
-criterion line. From the round that first closed it, every subsequent
-round reproduced it.
+- CVE-2026-43499: choose the correct task;
+- CVE-2026-53166: do not reach correct-task cleanup before that task exists.
 
-The closed ring is what makes stage 3.1 deterministic: the final
-re-prioritization has exactly one well-defined walk to perform, with
-the pre-walk state fully staged (contents authored via [2.3], heap
-shape pinned via [1.4]).
+## Source-review decision table
 
-## Reusability
+| Observation in vendor tree | Decision |
+| --- | --- |
+| `current->pi_lock` / `current->pi_blocked_on` in shared `remove_waiter()` | Affected semantic pattern |
+| Local `waiter_task = waiter->task`, used for lock, clear, and chain adjustment | Primary repair present |
+| Requeue self-deadlock checked before proxy cleanup, or equivalent proven initialization | Follow-up guard present |
+| Kernel version alone | Insufficient evidence |
 
-- [2.3] is entry-path-specific (compat setsockopt on this kernel
-  build) but *method-general*: for any kernel, the recipe is "find a
-  compat copy path whose destination frame depth is stable, verify
-  byte-exactness with a dumped payload, then author content."
-- [2.1]/[2.2] are semantic (futex PI), not gadget-specific: they use
-  documented kernel semantics, not build-specific addresses.
+## Validation matrix
+
+Test an instrumented engineering kernel across ordinary lock/unlock, requeue success, rollback, timeout, signal interruption, owner exit, top and non-top waiter cases, and self-deadlock. For every exit, assert correct `pi_lock` ownership, `pi_blocked_on` cleanup, balanced task references, consistent RB-tree caches, and absence of lockdep/KASAN/KCSAN reports.
+
+## References
+
+- [Upstream commit 3bfdc63936dd](https://git.kernel.org/linus/3bfdc63936dd4773109b7b8c280c0f3b5ae7d349)
+- [CVE-2026-43499 description and fixed-package tracking](https://security-tracker.debian.org/tracker/CVE-2026-43499)
+- [CVE-2026-53166 follow-up](https://access.redhat.com/security/cve/cve-2026-53166)
