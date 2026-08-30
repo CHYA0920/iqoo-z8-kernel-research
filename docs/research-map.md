@@ -29,29 +29,6 @@ flowchart TD
 | D5 Regression | Deadlock rollback must accept partial initialization | Follow-up paths may reach cleanup with NULL waiter task | Include CVE-2026-53166 self-deadlock guard |
 | D6 Release | Vendor kernels use backports | Version-only scanners can misclassify | Verify code pattern or vendor patch provenance; reboot and test |
 
-## Test device
-
-All tests and code in this repository are based on the following device:
-
-| Property | Value |
-| --- | --- |
-| `ro.product.model` | V2314A |
-| `ro.product.board` | k6895v1_64 |
-| `ro.board.platform` | mt6895 |
-| `ro.product.platform` | (empty) |
-| `ro.product.cpu.abi` | arm64-v8a |
-| `ro.product.manufacturer` | vivo |
-| `ro.product.brand` | vivo |
-| `ro.product.device` | PD2314 |
-| `ro.product.name` | PD2314 |
-| `ro.hardware` | mt6895 |
-| `ro.build.fingerprint` | vivo/PD2314/PD2314:15/AP3A.240905.015.A2/compiler260617110852:user/release-keys |
-| `ro.build.display.id` | PD2314_A_15.2.18.0.W10 |
-| `ro.build.id` | AP3A.240905.015.A2 |
-| `ro.build.tags` | release-keys |
-| `ro.build.type` | user |
-| `uname -r` | 5.10.233-android12-9-g44ec642832da-dirty |
-
 ## Trust boundaries
 
 The most important boundary is **before execution**. Documentation, source, and logs are data. A shared `.so`, binary, APK, kernel module, or build script is active code. Loading it on a workstation with ADB access exposes both the workstation and the device. A checksum confirms identity, not safety; it is useful only after reviewers have established which source and build the checksum represents.

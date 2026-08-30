@@ -29,29 +29,6 @@ flowchart TD
 | D5 回归 | 死锁回滚须容忍部分初始化 | 后续路径可能用 NULL waiter task 进入清理 | 纳入 CVE-2026-53166 自死锁保护 |
 | D6 发布 | 厂商内核使用补丁回移 | 仅按版本扫描可能误判 | 核验代码模式或厂商补丁来源；重启后测试 |
 
-## 测试设备
-
-本仓库全部测试和代码均基于以下设备：
-
-| 属性 | 值 |
-| --- | --- |
-| `ro.product.model` | V2314A |
-| `ro.product.board` | k6895v1_64 |
-| `ro.board.platform` | mt6895 |
-| `ro.product.platform` | (空) |
-| `ro.product.cpu.abi` | arm64-v8a |
-| `ro.product.manufacturer` | vivo |
-| `ro.product.brand` | vivo |
-| `ro.product.device` | PD2314 |
-| `ro.product.name` | PD2314 |
-| `ro.hardware` | mt6895 |
-| `ro.build.fingerprint` | vivo/PD2314/PD2314:15/AP3A.240905.015.A2/compiler260617110852:user/release-keys |
-| `ro.build.display.id` | PD2314_A_15.2.18.0.W10 |
-| `ro.build.id` | AP3A.240905.015.A2 |
-| `ro.build.tags` | release-keys |
-| `ro.build.type` | user |
-| `uname -r` | 5.10.233-android12-9-g44ec642832da-dirty |
-
 ## 信任边界
 
 最重要的边界发生在**执行之前**。文档、源码和日志是数据；共享 `.so`、二进制、APK、内核模块和构建脚本是主动代码。把它加载到具有 ADB 权限的工作站，会同时暴露工作站和设备。摘要只能证明文件身份，不能证明安全；只有先明确被审查的源码与构建关系，摘要才有意义。
